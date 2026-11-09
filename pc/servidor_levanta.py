@@ -201,7 +201,10 @@ class Server:
     async def send_status(self, msg=None):
         if msg:
             self.status["mensaje"] = msg
-            print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+            try:
+                print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+            except Exception:       # noqa: BLE001 — el registro nunca debe detener el programa
+                pass
         await self.broadcast(pack(MSG_STATUS, self.status))
 
     async def ws_phone(self, request):
@@ -290,30 +293,36 @@ class Server:
         self.status["procesando"] = True
         out = os.path.join(sdir, "resultado")
         py = PYTHON
+        # -X utf8: salida en UTF-8 aunque Windows use otra codificación por defecto
         cmds = [
-            [py, "-I", os.path.join(TOOLS, "procesar_rgbd.py"), sdir, "--salida", out,
+            [py, "-I", "-X", "utf8", os.path.join(TOOLS, "procesar_rgbd.py"), sdir, "--salida", out,
              "--voxel", "0.004", "--dmax", "3.5", "--conf", "2", "--lecturas", "2",
              "--triangulos-textura", "1500000"],
-            [py, "-I", os.path.join(TOOLS, "exportar_splat.py"), sdir,
+            [py, "-I", "-X", "utf8", os.path.join(TOOLS, "exportar_splat.py"), sdir,
              "--salida", os.path.join(sdir, "splat"), "--nube", os.path.join(out, "nube_fusionada.ply")],
         ]
-        for cmd in cmds:
-            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
-                                                        stderr=asyncio.subprocess.STDOUT,
-                                                        creationflags=NO_WINDOW)
-            async for line in proc.stdout:
-                text = line.decode(errors="replace").rstrip()
-                if text and not text.startswith("Warning"):
-                    await self.send_status(text)
-            await proc.wait()
-            if proc.returncode != 0:
-                await self.send_status(f"El procesamiento falló (código {proc.returncode}). Los datos están en {sdir}")
-                break
-        else:
-            self.status["resultados"].append(sdir)
-            await self.send_status(f"Listo. Resultados en {out}")
-        self.status["procesando"] = False
-        await self.send_status()
+        try:
+            for cmd in cmds:
+                proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
+                                                            stderr=asyncio.subprocess.STDOUT,
+                                                            creationflags=NO_WINDOW)
+                async for line in proc.stdout:
+                    text = line.decode("utf-8", errors="replace").rstrip()
+                    if text and not text.startswith("Warning"):
+                        await self.send_status(text)
+                await proc.wait()
+                if proc.returncode != 0:
+                    await self.send_status(f"El procesamiento falló (código {proc.returncode}). "
+                                           f"Los datos están en {sdir}")
+                    break
+            else:
+                self.status["resultados"].append(sdir)
+                await self.send_status(f"Listo. Resultados en {out}")
+        except Exception as e:      # noqa: BLE001
+            await self.send_status(f"El procesamiento falló: {e}. Los datos están en {sdir}")
+        finally:
+            self.status["procesando"] = False
+            await self.send_status()
 
     async def index(self, request):
         return web.FileResponse(os.path.join(AQUI, "web", "visor.html"))
@@ -341,6 +350,11 @@ def advertise(port):
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(description="Receptor de escaneos de la app 3D")
     ap.add_argument("--puerto", type=int, default=8765)
     ap.add_argument("--carpeta", default=os.path.join(os.path.expanduser("~"), "Levantamientos3D"))
