@@ -34,10 +34,11 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     // Ajustes (se aplican al reiniciar o al empezar un escaneo nuevo)
-    @Published var voxelSizeCm: Double = 1.0
+    @Published var voxelSizeCm: Double = 0.5
     @Published var maxDepth: Double = 4.0
     @Published var highConfidenceOnly = true
     @Published var minObservations: Int = 2
+    @Published var smoothDepth = false
 
     let pointsNode = SCNNode()
     private(set) var sceneView: ARSCNView?
@@ -50,18 +51,19 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var counts: [UInt16] = []
     private var scanning = false
     private var lastProcessTime: TimeInterval = 0
-    private var activeVoxel: Float = 0.01
+    private var activeVoxel: Float = 0.005
     private var activeMaxDepth: Float = 4.0
     private var activeMinConfidence: UInt8 = 2
     private var activeMinObs: UInt16 = 2
+    private var activeSmooth = false
     private var tracking = false
     private var previewTimer: Timer?
     private var previewBusy = false
     private var lastDistanceTime: TimeInterval = 0
 
     private let maxVoxels = 6_000_000
-    private let processInterval: TimeInterval = 0.12   // ~8 cuadros por segundo
-    private let pixelStep = 2                           // 1 de cada 2 píxeles del mapa de profundidad
+    private let processInterval: TimeInterval = 0.09   // ~11 cuadros por segundo
+    private let pixelStep = 1                           // todos los píxeles del mapa de profundidad
 
     // MARK: Vista AR
 
@@ -82,10 +84,11 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private func startSession(reset: Bool) {
         guard let view = sceneView else { return }
         let config = ARWorldTrackingConfiguration()
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
-            config.frameSemantics.insert(.smoothedSceneDepth)
-        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics.insert(.sceneDepth)
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+                config.frameSemantics.insert(.smoothedSceneDepth)
+            }
         } else {
             lidarAvailable = false
             statusMessage = "Este dispositivo no tiene LiDAR."
@@ -104,7 +107,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let depth = Float(maxDepth)
         let conf: UInt8 = highConfidenceOnly ? 2 : 1
         let minObs = UInt16(max(1, minObservations))
+        let smooth = smoothDepth
         queue.async {
+            self.activeSmooth = smooth
             if start && self.sums.isEmpty {
                 self.activeVoxel = voxel
             }
@@ -184,7 +189,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     // MARK: Integración de profundidad
 
     private func integrate(_ frame: ARFrame) {
-        guard let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth,
+        let chosen = activeSmooth ? (frame.smoothedSceneDepth ?? frame.sceneDepth)
+                                  : (frame.sceneDepth ?? frame.smoothedSceneDepth)
+        guard let depthData = chosen,
               let confMap = depthData.confidenceMap else { return }
         let depthMap = depthData.depthMap
         let image = frame.capturedImage

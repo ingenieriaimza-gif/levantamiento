@@ -1,9 +1,12 @@
-# Levanta — escáner LiDAR propio para iPhone
+# Levantamiento 3D — escáner LiDAR propio para iPhone
 
 App propia que usa directamente el sensor LiDAR del iPhone (ARKit) para crear nubes de puntos
 con color, en metros reales, y guardarlas como PLY.
 
-## Qué hace la versión 0.2
+## Qué hace la versión 0.3
+
+- Más detalle: lee todos los píxeles del LiDAR, ~11 cuadros por segundo, vóxeles de 2, 3 y 5 mm, y profundidad sin suavizar por defecto.
+- Icono propio y nombre "Levantamiento 3D".
 
 - **Modo cobertura:** puntos en rojo (1 lectura), ámbar (2–3) y verde (4 o más). Lo que no tiene puntos, falta.
 - **Mira con distancia en vivo:** verde hasta 1.5 m, ámbar hasta 3 m, rojo más lejos.

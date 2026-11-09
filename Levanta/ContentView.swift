@@ -147,7 +147,7 @@ struct ContentView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("vóxel \(engine.voxelSizeCm, specifier: "%.1f") cm")
+                Text("vóxel \(Int((engine.voxelSizeCm * 10).rounded())) mm")
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
             }
@@ -258,10 +258,11 @@ struct SettingsView: View {
             Form {
                 Section {
                     Picker("Tamaño de vóxel", selection: $engine.voxelSizeCm) {
-                        Text("0.5 cm (detalle)").tag(0.5)
-                        Text("1 cm (recomendado)").tag(1.0)
-                        Text("2 cm (cuartos grandes)").tag(2.0)
-                        Text("3 cm (exteriores)").tag(3.0)
+                        Text("2 mm (piezas pequeñas, a menos de 0.5 m)").tag(0.2)
+                        Text("3 mm (máximo detalle)").tag(0.3)
+                        Text("5 mm (recomendado)").tag(0.5)
+                        Text("1 cm (cuartos)").tag(1.0)
+                        Text("2 cm (espacios grandes)").tag(2.0)
                     }
                 } footer: {
                     Text("Un punto promedio por cada cubito de este tamaño. Se aplica al borrar y empezar un escaneo nuevo.")
@@ -273,6 +274,7 @@ struct SettingsView: View {
                         Slider(value: $engine.maxDepth, in: 1...5, step: 0.5)
                     }
                     Toggle("Solo puntos de alta confianza", isOn: $engine.highConfidenceOnly)
+                    Toggle("Profundidad suavizada", isOn: $engine.smoothDepth)
                     Stepper("Lecturas mínimas por punto: \(engine.minObservations)",
                             value: $engine.minObservations, in: 1...5)
                         .onChange(of: engine.minObservations) { _, v in
@@ -281,7 +283,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Precisión y ruido")
                 } footer: {
-                    Text("El LiDAR es más preciso de cerca: a más de 3–4 m aumenta el error. Pedir 2 o más lecturas por punto elimina destellos y puntos sueltos.")
+                    Text("El LiDAR es más preciso de cerca: a más de 3–4 m aumenta el error. Pedir 2 o más lecturas por punto elimina destellos y puntos sueltos. La profundidad suavizada da menos ruido pero redondea bordes y detalles finos.")
                 }
             }
             .navigationTitle("Ajustes")

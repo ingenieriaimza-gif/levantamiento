@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.2.0"
-    CURRENT_PROJECT_VERSION: "2"
+    MARKETING_VERSION: "0.3.0"
+    CURRENT_PROJECT_VERSION: "3"
 targets:
   Levanta:
     type: application
@@ -22,14 +22,15 @@ targets:
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGNING_REQUIRED: "NO"
         CODE_SIGN_IDENTITY: ""
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     info:
       path: Levanta/Info.plist
       properties:
-        CFBundleDisplayName: Levanta
+        CFBundleDisplayName: Levantamiento 3D
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
-        NSCameraUsageDescription: Levanta usa la cámara y el sensor LiDAR para crear nubes de puntos 3D.
+        NSCameraUsageDescription: Levantamiento 3D usa la cámara y el sensor LiDAR para crear nubes de puntos 3D.
         UIRequiredDeviceCapabilities:
           - arkit
         UISupportedInterfaceOrientations:
