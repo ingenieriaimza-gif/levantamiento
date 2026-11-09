@@ -1,0 +1,54 @@
+name: Compilar Levanta
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar XcodeGen
+        run: brew install xcodegen
+
+      - name: Generar proyecto de Xcode
+        run: xcodegen generate
+
+      - name: Compilar (sin firmar)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project Levanta.xcodeproj \
+            -scheme Levanta \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tee xcodebuild.log | grep -E "error:|warning: unre|BUILD" || true
+          test -d build/Build/Products/Release-iphoneos/Levanta.app
+
+      - name: Mostrar errores de compilación
+        if: failure()
+        run: grep -n "error:" xcodebuild.log | head -50 || true
+
+      - name: Empaquetar IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/Levanta.app Payload/
+          zip -qry Levanta.ipa Payload
+          ls -lh Levanta.ipa
+
+      - name: Publicar versión
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Levanta build ${{ github.run_number }}
+          body: "Descarga Levanta.ipa e instálala con Sideloadly."
+          files: Levanta.ipa

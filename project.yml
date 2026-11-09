@@ -1,0 +1,39 @@
+name: Levanta
+options:
+  bundleIdPrefix: com.levanta
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+targets:
+  Levanta:
+    type: application
+    platform: iOS
+    sources:
+      - Levanta
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.levanta.lidar
+        TARGETED_DEVICE_FAMILY: "1"
+        INFOPLIST_FILE: Levanta/Info.plist
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"
+        CODE_SIGN_IDENTITY: ""
+    info:
+      path: Levanta/Info.plist
+      properties:
+        CFBundleDisplayName: Levanta
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        NSCameraUsageDescription: Levanta usa la cámara y el sensor LiDAR para crear nubes de puntos 3D.
+        UIRequiredDeviceCapabilities:
+          - arkit
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UIStatusBarStyle: UIStatusBarStyleLightContent
