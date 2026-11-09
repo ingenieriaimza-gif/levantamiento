@@ -26,7 +26,7 @@ targets:
     info:
       path: Levanta/Info.plist
       properties:
-        CFBundleDisplayName: Levantamiento 3D
+        CFBundleDisplayName: "3D"
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
