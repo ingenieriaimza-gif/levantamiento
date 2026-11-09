@@ -23,6 +23,7 @@ struct ContentView: View {
                 topBar
                 if engine.streamToPC {
                     PCStatusPill(link: engine.link, triangles: engine.liveMeshTriangles)
+                    AppUpdateBanner(link: engine.link)
                 }
                 Spacer()
                 if engine.isScanning && engine.tooFast {
@@ -462,7 +463,58 @@ struct PCSettingsSection: View {
         } header: {
             Text("Procesar en la PC")
         } footer: {
+            Text("Versión de la app: \(PCLink.ownVersion) (build \(PCLink.ownBuild)). ") +
             Text("Abre el programa Levantamiento 3D en tu PC. Funciona con el mismo Wi-Fi, con el hotspot del iPhone (también por cable USB) o con la zona con cobertura inalámbrica de Windows; no necesita internet. Si la app no encuentra la PC sola, escribe la dirección que muestra el programa.")
+        }
+    }
+}
+
+
+// MARK: - Aviso de versión nueva guardada en la PC
+
+struct AppUpdateBanner: View {
+    @ObservedObject var link: PCLink
+    @State private var showHelp = false
+
+    var body: some View {
+        if link.hasNewerAppOnPC {
+            Button {
+                showHelp = true
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "arrow.down.app.fill").font(.title3)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Hay una versión nueva en tu PC").font(.footnote.weight(.bold))
+                        Text("\(link.pcAppVersion) (build \(link.pcAppBuild)) · tienes la build \(PCLink.ownBuild)")
+                            .font(.caption2)
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").font(.caption)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 9)
+                .background(Color(red: 0.96, green: 0.66, blue: 0.13).opacity(0.95), in: RoundedRectangle(cornerRadius: 14))
+                .foregroundStyle(Color(red: 0.1, green: 0.07, blue: 0.02))
+            }
+            .sheet(isPresented: $showHelp) {
+                NavigationStack {
+                    List {
+                        Section {
+                            Text("Apple no permite que una app se actualice sola fuera de la App Store, así que la instalación se hace desde la PC con tu Apple ID. Tus escaneos guardados se conservan.")
+                        }
+                        Section("Pasos") {
+                            Label("Conecta el iPhone a la PC por cable.", systemImage: "cable.connector")
+                            Label("En el programa de la PC: Actualizaciones › Instalar en el iPhone. Se abre Sideloadly con la app nueva.", systemImage: "desktopcomputer")
+                            Label("Pulsa Start en Sideloadly y espera a que termine.", systemImage: "play.circle")
+                        }
+                    }
+                    .navigationTitle("Actualizar la app")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) { Button("Listo") { showHelp = false } }
+                    }
+                }
+                .presentationDetents([.medium])
+            }
         }
     }
 }

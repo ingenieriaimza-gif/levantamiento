@@ -8,9 +8,12 @@ Las actualizaciones vienen de las versiones publicadas en GitHub:
 """
 import asyncio
 import hashlib
+import importlib.metadata
 import io
 import json
 import os
+import plistlib
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +29,68 @@ AQUI = os.path.dirname(os.path.abspath(__file__))
 RAIZ = os.path.normpath(os.path.join(AQUI, ".."))          # carpeta de instalación
 VERSION_FILE = os.path.join(RAIZ, "version.json")
 UA = {"User-Agent": "Levantamiento3D-PC", "Accept": "application/vnd.github+json"}
+PENDIENTE = os.path.join(RAIZ, "pendiente")              # actualización lista para aplicarse al reiniciar
+ULTIMA = os.path.join(RAIZ, "ultima_actualizacion.json")
+BUNDLE_ID = "com.levanta.lidar"
+
+
+# ------------------------------------------------------------------ requisitos
+
+def parse_requirements(text):
+    """Líneas tipo 'paquete==1.2', 'paquete>=1.2' o 'paquete'. Devuelve [(nombre, op, versión, línea)]."""
+    out = []
+    for line in text.splitlines():
+        line = line.split("#")[0].strip()
+        if not line:
+            continue
+        m = re.match(r"^([A-Za-z0-9_.\-]+)\s*(==|>=)?\s*([^;\s]*)", line)
+        if m:
+            out.append((m.group(1), m.group(2) or "", m.group(3) or "", line))
+    return out
+
+
+def _vt(v):
+    parts = []
+    for p in v.split("."):
+        m = re.match(r"\d+", p)
+        if not m:
+            break
+        parts.append(int(m.group()))
+    return tuple(parts)
+
+
+def installed_version(name):
+    try:
+        return importlib.metadata.version(name)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def satisfies(installed, op, ver):
+    if installed is None:
+        return False
+    if op == "==":
+        return _vt(installed) == _vt(ver)
+    if op == ">=":
+        return _vt(installed) >= _vt(ver)
+    return True
+
+
+def _norm(name):
+    return re.sub(r"[-_.]+", "_", name).lower()
+
+
+def ipa_info(path):
+    """Lee nombre, versión y build de una .ipa (Payload/*.app/Info.plist)."""
+    with zipfile.ZipFile(path) as z:
+        plists = [n for n in z.namelist() if re.match(r"^Payload/[^/]+\.app/Info\.plist$", n)]
+        if not plists:
+            raise ValueError("No es una app de iPhone (.ipa) válida")
+        info = plistlib.loads(z.read(plists[0]))
+    return {"bundle": info.get("CFBundleIdentifier", ""),
+            "nombre": info.get("CFBundleDisplayName") or info.get("CFBundleName", ""),
+            "version": info.get("CFBundleShortVersionString", ""),
+            "build": int(re.sub(r"\D", "", str(info.get("CFBundleVersion", "0"))) or 0)}
 
 
 def local_version():
@@ -87,6 +152,23 @@ def open_path(path):
         subprocess.Popen(["open", path])
     else:
         subprocess.Popen(["xdg-open", path])
+
+
+def find_sideloadly():
+    for base in (os.environ.get("LOCALAPPDATA", ""), os.environ.get("ProgramFiles", ""),
+                 os.environ.get("ProgramFiles(x86)", "")):
+        cand = os.path.join(base, "Sideloadly", "sideloadly.exe")
+        if base and os.path.exists(cand):
+            return cand
+    return None
+
+
+def reveal(path):
+    """Abre el Explorador con el archivo seleccionado (Windows) o la carpeta."""
+    if sys.platform.startswith("win"):
+        subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+    else:
+        open_path(os.path.dirname(path))
 
 
 def downloads_dir():
@@ -252,7 +334,8 @@ class Gestion:
         exe = sys.executable
         lanzador = os.path.join(AQUI, "lanzador.py")
         flags = 0x08000000 if sys.platform.startswith("win") else 0      # sin ventana de consola
-        subprocess.Popen([exe, "-I", lanzador, "--esperar", "--sin-ventana"], close_fds=True, creationflags=flags)
+        subprocess.Popen([exe, "-I", lanzador, "--esperar", "--sin-ventana", "--carpeta", self.root],
+                         close_fds=True, creationflags=flags)
         os._exit(0)
 
     async def descargar_app(self, request):
@@ -265,6 +348,7 @@ class Gestion:
             dest = os.path.join(downloads_dir(), f"Levanta_build{n}.ipa")
             with open(dest, "wb") as f:
                 f.write(data)
+            await loop.run_in_executor(None, self._store_app, dest)
             sideloadly = None
             for base in (os.environ.get("LOCALAPPDATA", ""), os.environ.get("ProgramFiles", ""),
                          os.environ.get("ProgramFiles(x86)", "")):
@@ -283,6 +367,203 @@ class Gestion:
     async def salir(self, request):
         asyncio.get_running_loop().call_later(0.5, os._exit, 0)
         return web.json_response({"ok": True})
+
+    # ---------------------------------------------------------- actualizar desde un archivo
+
+    def _incoming(self):
+        d = os.path.join(self.root, "_entrante")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    async def archivo_validar(self, request):
+        """Recibe el archivo elegido (se guarda por partes, sin límite de tamaño) y dice qué es y qué falta."""
+        reader = await request.multipart()
+        field = await reader.next()
+        if field is None or not field.filename:
+            return web.json_response({"ok": False, "mensaje": "No llegó ningún archivo"})
+        name = re.sub(r"[^A-Za-z0-9_.\-]", "_", os.path.basename(field.filename))[:120]
+        dest = os.path.join(self._incoming(), name)
+        with open(dest, "wb") as f:
+            while True:
+                chunk = await field.read_chunk(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+        loop = asyncio.get_running_loop()
+        try:
+            rep = await loop.run_in_executor(None, self._analizar, dest)
+        except Exception as e:      # noqa: BLE001
+            rep = {"ok": False, "mensaje": f"No se pudo leer el archivo: {e}"}
+        rep["token"] = name
+        return web.json_response(rep)
+
+    def _analizar(self, path):
+        low = path.lower()
+        size_mb = round(os.path.getsize(path) / 1e6, 1)
+        if low.endswith(".ipa"):
+            info = ipa_info(path)
+            if info["bundle"] != BUNDLE_ID:
+                return {"ok": False, "mensaje": f"Esta app ({info['bundle']}) no es la app 3D."}
+            actual = self._stored_app()
+            return {"ok": True, "tipo": "ipa", "mb": size_mb, **info,
+                    "actual_build": actual.get("build", 0) if actual else 0,
+                    "resumen": f"App del iPhone {info['nombre']} {info['version']} (build {info['build']})",
+                    "puede": True}
+        if low.endswith(".exe"):
+            with open(path, "rb") as f:
+                if f.read(2) != b"MZ":
+                    return {"ok": False, "mensaje": "El archivo no es un instalador de Windows válido"}
+            return {"ok": True, "tipo": "exe", "mb": size_mb, "puede": True,
+                    "resumen": "Instalador completo del programa: se cerrará el programa y se abrirá el instalador."}
+        if not zipfile.is_zipfile(path):
+            return {"ok": False, "mensaje": "Formato no reconocido. Usa actualizacion_pc.zip, "
+                                            "Levantamiento3D_Setup.exe o Levanta.ipa"}
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+            for n in names:
+                if n.startswith("/") or ".." in n.replace("\\", "/").split("/"):
+                    return {"ok": False, "mensaje": "El paquete trae rutas no permitidas"}
+            prefix = next((n[: -len("pc/servidor_levanta.py")] for n in names
+                           if n.endswith("pc/servidor_levanta.py")), None)
+            if prefix is None or (prefix + "tools/procesar_rgbd.py") not in names:
+                return {"ok": False, "mensaje": "El zip no es una actualización del programa (faltan pc/ o tools/)"}
+            remote = {}
+            if prefix + "version.json" in names:
+                try:
+                    remote = json.loads(z.read(prefix + "version.json"))
+                except ValueError:
+                    remote = {}
+            reqs = parse_requirements(z.read(prefix + "pc/requirements.txt").decode("utf-8", "replace")) \
+                if prefix + "pc/requirements.txt" in names else []
+            wheels = [os.path.basename(n) for n in names if n.startswith(prefix + "wheels/") and n.endswith(".whl")]
+        wheel_names = {_norm(w.split("-")[0]) for w in wheels}
+        checks, faltan, sin_rueda = [], [], []
+        for name, op, ver, line in reqs:
+            inst = installed_version(name)
+            ok = satisfies(inst, op, ver)
+            checks.append({"paquete": name, "requiere": f"{op}{ver}" if op else "cualquiera",
+                           "instalado": inst or "no instalado", "ok": ok})
+            if not ok:
+                faltan.append(line)
+                if _norm(name) not in wheel_names:
+                    sin_rueda.append(name)
+        tiene_pip = "pip" in wheel_names or installed_version("pip") is not None
+        puede = not faltan or (not sin_rueda and tiene_pip)
+        local = local_version()
+        motivo = ""
+        if faltan and sin_rueda:
+            motivo = ("Faltan librerías que este paquete no incluye: " + ", ".join(sin_rueda) +
+                      ". Usa el instalador completo (Levantamiento3D_Setup.exe).")
+        elif faltan and not tiene_pip:
+            motivo = "El paquete trae librerías nuevas pero no el instalador de paquetes (pip)."
+        return {"ok": True, "tipo": "pc", "mb": size_mb, "puede": puede, "motivo": motivo,
+                "version_actual": local.get("pc", 0), "version_nueva": remote.get("pc", "desconocida"),
+                "requisitos": checks, "faltan": faltan, "ruedas": len(wheels),
+                "resumen": (f"Programa de la PC versión {remote.get('pc', '?')}"
+                            + (f" · instalará {len(faltan)} librería(s) desde el paquete" if faltan and puede else ""))}
+
+    async def archivo_instalar(self, request):
+        data = await request.json()
+        name = os.path.basename(str(data.get("token", "")))
+        path = os.path.join(self._incoming(), name)
+        if not name or not os.path.exists(path):
+            return web.json_response({"ok": False, "mensaje": "Vuelve a elegir el archivo"})
+        loop = asyncio.get_running_loop()
+        rep = await loop.run_in_executor(None, self._analizar, path)
+        if not rep.get("ok") or not rep.get("puede"):
+            return web.json_response({"ok": False, "mensaje": rep.get("motivo") or rep.get("mensaje", "No se puede instalar")})
+        if rep["tipo"] == "ipa":
+            await loop.run_in_executor(None, self._store_app, path)
+            return web.json_response({"ok": True, "mensaje": f"Listo: {rep['resumen']} guardada. "
+                                      "El iPhone verá el aviso al conectarse al programa."})
+        if rep["tipo"] == "exe":
+            subprocess.Popen([path], close_fds=True)
+            loop.call_later(1.5, os._exit, 0)
+            return web.json_response({"ok": True, "mensaje": "Se abrió el instalador. El programa se cerrará."})
+        await loop.run_in_executor(None, self._stage_zip, path, rep)
+        loop.call_later(1.0, self._restart)
+        return web.json_response({"ok": True, "reinicia": True,
+                                  "mensaje": "Actualización preparada. El programa se reinicia para aplicarla…"})
+
+    def _stage_zip(self, path, rep):
+        """Deja la actualización en 'pendiente/'; el lanzador la aplica al reiniciar
+        (así ninguna librería está en uso mientras se reemplaza)."""
+        shutil.rmtree(PENDIENTE, ignore_errors=True)
+        stage = PENDIENTE + "_tmp"
+        shutil.rmtree(stage, ignore_errors=True)
+        with zipfile.ZipFile(path) as z:
+            z.extractall(stage)
+        names = os.listdir(stage)
+        root = stage
+        if "pc" not in names and len(names) == 1 and os.path.isdir(os.path.join(stage, names[0])):
+            root = os.path.join(stage, names[0])
+        with open(os.path.join(root, "aplicar.json"), "w", encoding="utf-8") as f:
+            json.dump({"faltan": rep.get("faltan", []), "version": rep.get("version_nueva")}, f)
+        os.replace(root, PENDIENTE)
+        shutil.rmtree(stage, ignore_errors=True)
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    async def ultima(self, request):
+        try:
+            with open(ULTIMA, encoding="utf-8") as f:
+                return web.json_response(json.load(f))
+        except (OSError, ValueError):
+            return web.json_response({})
+
+    # ---------------------------------------------------------- app del iPhone guardada en la PC
+
+    def _app_dir(self):
+        d = os.path.join(self.root, "app_iphone")
+        os.makedirs(d, exist_ok=True)
+        return d
+
+    def _stored_app(self):
+        try:
+            with open(os.path.join(self._app_dir(), "info.json"), encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    def _store_app(self, path):
+        info = ipa_info(path)
+        dest = os.path.join(self._app_dir(), "Levanta.ipa")
+        shutil.copyfile(path, dest)
+        info["guardada"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        info["bytes"] = os.path.getsize(dest)
+        with open(os.path.join(self._app_dir(), "info.json"), "w", encoding="utf-8") as f:
+            json.dump(info, f)
+        self.publish_app_status()
+        return info
+
+    def publish_app_status(self):
+        info = self._stored_app() or {}
+        self.server.status["app_build"] = info.get("build", 0)
+        self.server.status["app_version"] = info.get("version", "")
+
+    async def instalar_iphone(self, request):
+        p = os.path.join(self._app_dir(), "Levanta.ipa")
+        if not os.path.exists(p):
+            return web.json_response({"ok": False, "mensaje": "Primero guarda una app: descárgala o elige el archivo .ipa."})
+        sl = find_sideloadly()
+        if sl:
+            subprocess.Popen([sl], close_fds=True)
+        reveal(p)
+        return web.json_response({"ok": True, "sideloadly": bool(sl),
+                                  "mensaje": ("Se abrió Sideloadly y la carpeta con Levanta.ipa: arrástrala a Sideloadly y pulsa Start."
+                                              if sl else "Se abrió la carpeta con Levanta.ipa. Instala Sideloadly (sideloadly.io) "
+                                                         "y arrastra el archivo.")})
+
+    async def app_info(self, request):
+        return web.json_response(self._stored_app() or {})
+
+    async def app_ipa(self, request):
+        p = os.path.join(self._app_dir(), "Levanta.ipa")
+        if not os.path.exists(p):
+            raise web.HTTPNotFound(text="No hay app guardada en la PC")
+        return web.FileResponse(p, headers={"Content-Disposition": "attachment; filename=Levanta.ipa"})
 
     @staticmethod
     @web.middleware
@@ -305,3 +586,10 @@ class Gestion:
         app.router.add_post("/api/actualizar_pc", self.actualizar_pc)
         app.router.add_post("/api/descargar_app", self.descargar_app)
         app.router.add_post("/api/salir", self.salir)
+        app.router.add_post("/api/archivo/validar", self.archivo_validar)
+        app.router.add_post("/api/archivo/instalar", self.archivo_instalar)
+        app.router.add_get("/api/ultima", self.ultima)
+        app.router.add_post("/api/instalar_iphone", self.instalar_iphone)
+        app.router.add_get("/app/info.json", self.app_info)          # visible para el iPhone en la red local
+        app.router.add_get("/app/Levanta.ipa", self.app_ipa)
+        self.publish_app_status()

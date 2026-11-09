@@ -39,7 +39,7 @@ jobs:
           Set-Content $pth $lines
           Get-Content $pth
           python -m pip install --upgrade pip
-          python -m pip install -r pc\requirements.txt --target dist\app\python\Lib\site-packages --no-warn-script-location
+          python -m pip install -r pc\requirements.txt pip --target dist\app\python\Lib\site-packages --no-warn-script-location
           Invoke-WebRequest "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile dist\vc_redist.x64.exe
 
       - name: Código y versión
@@ -109,14 +109,60 @@ jobs:
           Invoke-RestMethod http://localhost:8765/api/version
           netsh advfirewall firewall show rule name="Levantamiento 3D" | Select-String "Puerto|Port|Programa|Program" | Select-Object -First 6
 
+      - name: Probar actualización desde archivo (librería nueva, sin internet)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force t\pkg\wheels | Out-Null
+          Copy-Item -Recurse dist\app\pc t\pkg\pc
+          Copy-Item -Recurse dist\app\tools t\pkg\tools
+          Add-Content t\pkg\pc\requirements.txt "tabulate==0.9.0"
+          Set-Content -Encoding utf8NoBOM t\pkg\version.json '{"pc": 9999, "req": "prueba"}'
+          python -m pip download tabulate==0.9.0 pip -d t\pkg\wheels --only-binary=:all: --quiet
+          Compress-Archive -Path t\pkg\* -DestinationPath t\actualizacion_prueba.zip
+          $v = curl.exe -s -H "X-Levanta: 1" -F "archivo=@t\actualizacion_prueba.zip" http://localhost:8765/api/archivo/validar | ConvertFrom-Json
+          "Validación: puede=$($v.puede) faltan=$($v.faltan -join ', ') ruedas=$($v.ruedas) $($v.motivo)"
+          if (-not $v.puede -or $v.faltan.Count -ne 1) { exit 1 }
+          $r = curl.exe -s -H "X-Levanta: 1" -H "Content-Type: application/json" -d "{`"token`":`"$($v.token)`"}" http://localhost:8765/api/archivo/instalar | ConvertFrom-Json
+          "Instalar: $($r.mensaje)"
+          Start-Sleep 6
+          $ok = $false
+          for ($i = 0; $i -lt 90; $i++) {
+            try { $ver = Invoke-RestMethod http://localhost:8765/api/version; if ($ver.pc -eq 9999) { $ok = $true; break } } catch {}
+            Start-Sleep 2
+          }
+          Invoke-RestMethod http://localhost:8765/api/ultima | Format-List
+          Get-Content "$PWD\prueba2\registro.txt" -Tail 15
+          if (-not $ok) { exit 1 }
+          C:\L3D\python\python.exe -I -c "import tabulate; print('tabulate', tabulate.__version__, 'instalada desde el paquete')"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
       - name: Paquete de actualización
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force upd | Out-Null
           Copy-Item -Recurse dist\app\pc upd\pc
           Copy-Item -Recurse dist\app\tools upd\tools
+          Copy-Item dist\version.json upd\version.json
           Get-ChildItem upd -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
-          Compress-Archive -Path upd\pc, upd\tools -DestinationPath dist\actualizacion_pc.zip
+          # si cambiaron las librerías respecto a la versión publicada anterior, el paquete las incluye
+          $prevReq = ""
+          try {
+            $rels = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases?per_page=40"
+            $prev = $rels | Where-Object { $_.tag_name -like "pc-*" } | Sort-Object { [int]($_.tag_name -replace 'pc-','') } -Descending | Select-Object -First 1
+            $asset = $prev.assets | Where-Object { $_.name -eq "version.json" } | Select-Object -First 1
+            if ($asset) { $prevReq = (Invoke-RestMethod $asset.browser_download_url).req }
+          } catch {}
+          $req = (Get-Content dist\version.json | ConvertFrom-Json).req
+          "Requisitos: anterior=$prevReq actual=$req"
+          $items = @("upd\pc", "upd\tools", "upd\version.json")
+          if ($prevReq -ne $req) {
+            python -m pip download -r pc\requirements.txt pip -d upd\wheels --only-binary=:all: --quiet
+            $items += "upd\wheels"
+          }
+          Compress-Archive -Path $items -DestinationPath dist\actualizacion_pc.zip
+          Get-ChildItem dist\actualizacion_pc.zip | Format-Table Name, Length
 
       - name: Publicar versión
         uses: softprops/action-gh-release@v2

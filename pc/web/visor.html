@@ -56,6 +56,13 @@
   .files button { font-family: var(--mono); font-size: 12px; }
   .ver { font: 600 28px var(--mono); }
   #upd-msg { min-height: 1.4em; }
+  .drop { border: 1.5px dashed var(--line); border-radius: 10px; padding: 18px; text-align: center; color: var(--muted); cursor: pointer; }
+  .drop.over, .drop:hover { border-color: var(--accent); color: var(--fg); }
+  table.req { border-collapse: collapse; font-size: 13px; width: 100%; }
+  table.req td, table.req th { padding: 4px 8px; border-bottom: 1px solid var(--line); text-align: left; font-variant-numeric: tabular-nums; }
+  table.req th { color: var(--muted); font-weight: 500; }
+  .okc { color: var(--ok); } .badc { color: var(--bad); }
+  .note { padding: 10px 12px; border-radius: 8px; background: #1d232b; }
 </style>
 </head>
 <body>
@@ -109,6 +116,21 @@
         Conecta el iPhone por cable, arrastra el archivo a Sideloadly y pulsa Start.</div>
       <div class="row"><button class="btn primary" id="dl-app" type="button" disabled>Descargar app del iPhone</button></div>
     </div>
+    <div class="card">
+      <div><div class="muted">Instalar desde un archivo</div>
+        <div>Elige <b>actualizacion_pc.zip</b>, <b>Levantamiento3D_Setup.exe</b> o <b>Levanta.ipa</b>. El programa revisa qué es y qué le falta antes de instalar; no necesita internet.</div></div>
+      <label class="drop" id="drop" for="file-in">Arrastra el archivo aquí o haz clic para elegirlo
+        <input id="file-in" type="file" accept=".zip,.exe,.ipa" hidden></label>
+      <div id="file-report"></div>
+      <div class="row"><button class="btn primary" id="file-install" type="button" hidden>Instalar</button></div>
+    </div>
+    <div class="card">
+      <div class="muted">App guardada en esta PC para el iPhone</div>
+      <div id="stored-app">Ninguna todavía</div>
+      <div class="row"><button class="btn primary" id="to-iphone" type="button">Instalar en el iPhone</button>
+        <span class="muted">Conecta el iPhone por cable; se abre Sideloadly con la app.</span></div>
+      <div class="muted">Cuando el iPhone se conecte al programa y tenga una versión anterior, la app mostrará un aviso.</div>
+    </div>
     <div id="upd-msg" class="muted"></div>
     <div class="card">
       <div class="muted">Cerrar el programa deja de recibir escaneos del iPhone. Para volver a abrirlo usa el acceso directo del escritorio.</div>
@@ -131,7 +153,7 @@ function show(name) {
   tabs.forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
   for (const t of ['visor', 'escaneos', 'actualizaciones']) $('tab-' + t).hidden = t !== name;
   if (name === 'escaneos') loadScans();
-  if (name === 'actualizaciones') checkUpdates();
+  if (name === 'actualizaciones') { checkUpdates(); showStoredApp(); }
 }
 tabs.forEach(b => b.onclick = () => show(b.dataset.tab));
 
@@ -302,6 +324,74 @@ async function checkUpdates() {
   $('upd-msg').textContent = '';
 }
 $('check').onclick = checkUpdates;
+
+// ---------- instalar desde archivo
+let fileToken = null;
+async function showStoredApp() {
+  const a = await fetch('/app/info.json').then(r => r.json()).catch(() => ({}));
+  $('stored-app').textContent = a.build ? `${a.nombre || '3D'} ${a.version} · build ${a.build} · guardada ${a.guardada}` : 'Ninguna todavía';
+  const u = await fetch('/api/ultima').then(r => r.json()).catch(() => ({}));
+  if (u.mensaje) $('upd-msg').textContent = `Última actualización (${u.fecha}): ${u.mensaje}`;
+}
+async function analyze(file) {
+  const rep = $('file-report');
+  rep.replaceChildren(el('div', { className: 'muted', textContent: `Revisando ${file.name}…` }));
+  $('file-install').hidden = true;
+  const fd = new FormData();
+  fd.append('archivo', file, file.name);
+  let r;
+  try {
+    r = await fetch('/api/archivo/validar', { method: 'POST', headers: { 'X-Levanta': '1' }, body: fd }).then(x => x.json());
+  } catch (e) { rep.replaceChildren(el('div', { className: 'note badc', textContent: 'No se pudo enviar el archivo.' })); return; }
+  fileToken = r.token;
+  rep.replaceChildren();
+  if (!r.ok) { rep.append(el('div', { className: 'note badc', textContent: r.mensaje })); return; }
+  rep.append(el('div', { className: 'note', textContent: `${r.resumen} · ${r.mb} MB` }));
+  if (r.tipo === 'pc') {
+    rep.append(el('div', { className: 'muted', textContent: `Versión instalada: ${r.version_actual || 'desarrollo'} → nueva: ${r.version_nueva}` }));
+    if (r.requisitos && r.requisitos.length) {
+      const t = el('table', { className: 'req' });
+      t.append(el('tr', {}, el('th', { textContent: 'Librería' }), el('th', { textContent: 'Requiere' }),
+                       el('th', { textContent: 'Instalada' }), el('th', { textContent: '' })));
+      for (const q of r.requisitos) {
+        t.append(el('tr', {}, el('td', { textContent: q.paquete }), el('td', { textContent: q.requiere }),
+          el('td', { textContent: q.instalado }), el('td', { className: q.ok ? 'okc' : 'badc', textContent: q.ok ? 'bien' : 'falta' })));
+      }
+      rep.append(t);
+    }
+    if (r.motivo) rep.append(el('div', { className: 'note badc', textContent: r.motivo }));
+  }
+  if (r.tipo === 'ipa' && r.actual_build) {
+    rep.append(el('div', { className: 'muted', textContent: `En la PC ya está la build ${r.actual_build}.` }));
+  }
+  $('file-install').hidden = !r.puede;
+  $('file-install').textContent = r.tipo === 'ipa' ? 'Guardar para el iPhone' : r.tipo === 'exe' ? 'Abrir instalador' : 'Instalar actualización';
+}
+$('to-iphone').onclick = async () => {
+  const r = await post('/api/instalar_iphone');
+  $('upd-msg').textContent = r.mensaje;
+};
+$('file-in').onchange = (e) => { if (e.target.files[0]) analyze(e.target.files[0]); e.target.value = ''; };
+const drop = $('drop');
+drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+drop.ondragleave = () => drop.classList.remove('over');
+drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) analyze(e.dataTransfer.files[0]); };
+$('file-install').onclick = async () => {
+  $('file-install').disabled = true;
+  const r = await post('/api/archivo/instalar', { token: fileToken });
+  $('upd-msg').textContent = r.mensaje;
+  $('file-install').disabled = false;
+  if (r.ok) { $('file-install').hidden = true; showStoredApp(); }
+  if (r.reinicia) {
+    const t0 = Date.now();
+    const wait = setInterval(async () => {
+      try {
+        const ok = await fetch('/estado', { cache: 'no-store' }).then(x => x.ok);
+        if (ok && Date.now() - t0 > 5000) { clearInterval(wait); location.reload(); }
+      } catch (e) { /* reiniciando */ }
+    }, 1500);
+  }
+};
 $('upd-pc').onclick = async () => {
   $('upd-pc').disabled = true;
   $('upd-msg').textContent = 'Descargando la actualización…';

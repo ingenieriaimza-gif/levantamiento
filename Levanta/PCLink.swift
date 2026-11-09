@@ -25,6 +25,18 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     @Published private(set) var pcFrames = 0
     @Published private(set) var pcMessage = ""
     @Published private(set) var pcProcessing = false
+    /// Versión de la app del iPhone guardada en la PC (0 si no hay).
+    @Published private(set) var pcAppBuild = 0
+    @Published private(set) var pcAppVersion = ""
+
+    /// Build de esta app instalada.
+    static let ownBuild: Int = {
+        let raw = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
+        return Int(raw.filter(\.isNumber)) ?? 0
+    }()
+    static let ownVersion: String = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+
+    var hasNewerAppOnPC: Bool { pcAppBuild > PCLink.ownBuild }
     @Published var manualAddress: String = UserDefaults.standard.string(forKey: "pcAddress") ?? "" {
         didSet { UserDefaults.standard.set(manualAddress, forKey: "pcAddress") }
     }
@@ -201,10 +213,14 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
             let frames = (u.header["cuadros"] as? NSNumber)?.intValue ?? 0
             let msg = u.header["mensaje"] as? String ?? ""
             let proc = (u.header["procesando"] as? NSNumber)?.boolValue ?? false
+            let appBuild = (u.header["app_build"] as? NSNumber)?.intValue ?? 0
+            let appVersion = u.header["app_version"] as? String ?? ""
             DispatchQueue.main.async {
                 self.pcFrames = frames
                 self.pcMessage = msg
                 self.pcProcessing = proc
+                self.pcAppBuild = appBuild
+                self.pcAppVersion = appVersion
             }
         }
     }
