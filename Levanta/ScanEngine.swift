@@ -15,6 +15,23 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     @Published var statusMessage: String?
     @Published var lidarAvailable = true
     @Published var showCloud = true
+    @Published var colorMode: ColorMode = .coverage
+    /// Distancia (m) a lo que apunta el centro de la pantalla; nil si no hay lectura.
+    @Published var centerDistance: Float?
+
+    enum ColorMode: String, CaseIterable, Identifiable {
+        case coverage = "Cobertura"
+        case real = "Color real"
+        var id: String { rawValue }
+    }
+
+    /// Resumen de la nube para la revisión 3D.
+    struct CloudStats {
+        var points: Int
+        var size: SIMD3<Float>     // ancho (x), alto (y), largo (z) en metros
+        var center: SIMD3<Float>
+        var weak: Int              // puntos con una sola lectura
+    }
 
     // Ajustes (se aplican al reiniciar o al empezar un escaneo nuevo)
     @Published var voxelSizeCm: Double = 1.0
@@ -40,6 +57,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var tracking = false
     private var previewTimer: Timer?
     private var previewBusy = false
+    private var lastDistanceTime: TimeInterval = 0
 
     private let maxVoxels = 6_000_000
     private let processInterval: TimeInterval = 0.12   // ~8 cuadros por segundo
@@ -121,6 +139,11 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     // MARK: ARSessionDelegate (se llama en `queue`)
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        if frame.timestamp - lastDistanceTime >= 0.25 {
+            lastDistanceTime = frame.timestamp
+            let d = centerDepth(frame)
+            DispatchQueue.main.async { self.centerDistance = d }
+        }
         guard scanning, tracking else { return }
         guard frame.timestamp - lastProcessTime >= processInterval else { return }
         lastProcessTime = frame.timestamp
@@ -277,9 +300,12 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         guard !previewBusy else { return }
         previewBusy = true
         let show = showCloud
+        let mode = colorMode
         queue.async {
-            let total = self.counts.reduce(0) { $0 + ($1 >= self.activeMinObs ? 1 : 0) }
-            let geometry = show ? self.buildPreviewGeometry() : nil
+            let minObs = self.activeMinObs
+            let total = self.counts.reduce(0) { $0 + ($1 >= minObs ? 1 : 0) }
+            let geometry = show ? self.buildGeometry(mode: mode, maxPoints: 400_000,
+                                                     pointSize: 5, maxRadius: 4) : nil
             DispatchQueue.main.async {
                 self.pointCount = total
                 self.pointsNode.geometry = geometry
@@ -288,12 +314,54 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
-    /// Construye la geometría de puntos (máx. ~400 mil en pantalla para mantener fluidez).
-    private func buildPreviewGeometry() -> SCNGeometry? {
+    /// Geometría y resumen para la revisión 3D fuera de la cámara.
+    func makeReviewData(mode: ColorMode, completion: @escaping (SCNGeometry?, CloudStats) -> Void) {
+        queue.async {
+            let geometry = self.buildGeometry(mode: mode, maxPoints: 1_500_000,
+                                              pointSize: 4, maxRadius: 3)
+            let stats = self.computeStats()
+            DispatchQueue.main.async { completion(geometry, stats) }
+        }
+    }
+
+    private func computeStats() -> CloudStats {
+        let minObs = activeMinObs
+        var lo = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var hi = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+        var kept = 0
+        var weak = 0
+        for i in 0..<sums.count {
+            let c = counts[i]
+            if c == 1 { weak += 1 }
+            guard c >= minObs else { continue }
+            let p = sums[i] / Float(c)
+            lo = simd_min(lo, p)
+            hi = simd_max(hi, p)
+            kept += 1
+        }
+        if kept == 0 {
+            return CloudStats(points: 0, size: .zero, center: .zero, weak: weak)
+        }
+        return CloudStats(points: kept, size: hi - lo, center: (hi + lo) / 2, weak: weak)
+    }
+
+    /// Color según cuántas veces se leyó cada punto: rojo = 1, ámbar = 2–3, verde = 4 o más.
+    private func coverageColor(_ count: UInt16) -> SIMD3<Float> {
+        switch count {
+        case 0...1: return SIMD3<Float>(0.95, 0.24, 0.20)
+        case 2...3: return SIMD3<Float>(0.98, 0.70, 0.15)
+        default:    return SIMD3<Float>(0.25, 0.85, 0.40)
+        }
+    }
+
+    /// Construye la geometría de puntos. En modo cobertura se incluyen también los puntos
+    /// de una sola lectura (en rojo) para que se vea el ruido y lo que falta reforzar.
+    private func buildGeometry(mode: ColorMode, maxPoints: Int,
+                               pointSize: CGFloat, maxRadius: CGFloat) -> SCNGeometry? {
         let n = sums.count
         guard n > 0 else { return nil }
-        let step = max(1, n / 400_000)
-        let minObs = activeMinObs
+        let step = max(1, n / maxPoints)
+        let minObs: UInt16 = mode == .coverage ? 1 : activeMinObs
         var verts: [SIMD3<Float>] = []
         var cols: [SIMD3<Float>] = []
         verts.reserveCapacity(n / step + 1)
@@ -304,7 +372,11 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             if cnt >= minObs {
                 let k = Float(cnt)
                 verts.append(sums[i] / k)
-                cols.append(colorSums[i] / (k * 255))
+                if mode == .coverage {
+                    cols.append(coverageColor(cnt))
+                } else {
+                    cols.append(colorSums[i] / (k * 255))
+                }
             }
             i += step
         }
@@ -321,9 +393,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                                         bytesPerComponent: 4, dataOffset: 0, dataStride: vStride)
         let indices = (0..<UInt32(verts.count)).map { $0 }
         let element = SCNGeometryElement(indices: indices, primitiveType: .point)
-        element.pointSize = 5
+        element.pointSize = pointSize
         element.minimumPointScreenSpaceRadius = 1
-        element.maximumPointScreenSpaceRadius = 4
+        element.maximumPointScreenSpaceRadius = maxRadius
 
         let geometry = SCNGeometry(sources: [vSource, cSource], elements: [element])
         let material = SCNMaterial()
@@ -332,6 +404,30 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         material.isDoubleSided = true
         geometry.materials = [material]
         return geometry
+    }
+
+    /// Profundidad en el centro de la imagen (mediana de una ventana de 5×5), en metros.
+    private func centerDepth(_ frame: ARFrame) -> Float? {
+        guard let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth else { return nil }
+        let map = depthData.depthMap
+        CVPixelBufferLockBaseAddress(map, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(map, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(map) else { return nil }
+        let w = CVPixelBufferGetWidth(map)
+        let h = CVPixelBufferGetHeight(map)
+        let row = CVPixelBufferGetBytesPerRow(map)
+        var values: [Float] = []
+        values.reserveCapacity(25)
+        for v in (h / 2 - 2)...(h / 2 + 2) {
+            let ptr = base.advanced(by: v * row).assumingMemoryBound(to: Float32.self)
+            for u in (w / 2 - 2)...(w / 2 + 2) {
+                let d = ptr[u]
+                if d.isFinite && d > 0 { values.append(d) }
+            }
+        }
+        guard !values.isEmpty else { return nil }
+        values.sort()
+        return values[values.count / 2]
     }
 
     // MARK: Exportar

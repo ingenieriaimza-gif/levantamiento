@@ -3,7 +3,11 @@
 App propia que usa directamente el sensor LiDAR del iPhone (ARKit) para crear nubes de puntos
 con color, en metros reales, y guardarlas como PLY.
 
-## Qué hace la versión 0.1
+## Qué hace la versión 0.2
+
+- **Modo cobertura:** puntos en rojo (1 lectura), ámbar (2–3) y verde (4 o más). Lo que no tiene puntos, falta.
+- **Mira con distancia en vivo:** verde hasta 1.5 m, ámbar hasta 3 m, rojo más lejos.
+- **Revisar 3D:** al pausar, la nube se gira y acerca con los dedos, con vistas de planta y frente y medidas generales.
 
 - Lee la profundidad del LiDAR ~8 veces por segundo y la convierte en puntos 3D con color.
 - Acumula los puntos en una rejilla de vóxeles (0.5–3 cm): un punto promedio por cubito, sin duplicados.

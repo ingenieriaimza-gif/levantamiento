@@ -9,12 +9,15 @@ struct ContentView: View {
     @State private var showScans = false
     @State private var saving = false
     @State private var confirmReset = false
+    @State private var showReview = false
     @State private var toast: String?
 
     var body: some View {
         ZStack {
             ARContainer(engine: engine)
                 .ignoresSafeArea()
+
+            reticle
 
             VStack(spacing: 12) {
                 topBar
@@ -45,12 +48,45 @@ struct ContentView: View {
         .sheet(isPresented: $showScans) {
             ScansView()
         }
+        .fullScreenCover(isPresented: $showReview) {
+            ReviewView(engine: engine)
+        }
         .confirmationDialog("¿Borrar el escaneo actual?", isPresented: $confirmReset, titleVisibility: .visible) {
             Button("Borrar y empezar de nuevo", role: .destructive) { engine.reset() }
             Button("Cancelar", role: .cancel) {}
         } message: {
             Text("Los puntos que no hayas guardado se perderán.")
         }
+    }
+
+    // MARK: Mira central con distancia
+
+    private var reticle: some View {
+        let d = engine.centerDistance
+        let color: Color
+        let hint: String
+        if let d {
+            if d <= 1.5 { color = .green; hint = "precisión alta" }
+            else if d <= 3.0 { color = accent; hint = "precisión media" }
+            else { color = .red; hint = "muy lejos" }
+        } else {
+            color = .white.opacity(0.6); hint = "sin lectura"
+        }
+        return VStack(spacing: 6) {
+            ZStack {
+                Circle().stroke(color, lineWidth: 2).frame(width: 34, height: 34)
+                Circle().fill(color).frame(width: 4, height: 4)
+            }
+            VStack(spacing: 0) {
+                Text(d.map { String(format: "%.2f m", $0) } ?? "–")
+                    .font(.system(size: 15, weight: .bold, design: .monospaced))
+                Text(hint).font(.caption2)
+            }
+            .padding(.horizontal, 10).padding(.vertical, 4)
+            .background(.black.opacity(0.45), in: Capsule())
+            .foregroundStyle(color)
+        }
+        .allowsHitTesting(false)
     }
 
     // MARK: Barra superior
@@ -69,6 +105,15 @@ struct ContentView: View {
             .background(.ultraThinMaterial, in: Capsule())
 
             Spacer()
+
+            Button {
+                engine.colorMode = engine.colorMode == .coverage ? .real : .coverage
+            } label: {
+                Image(systemName: engine.colorMode == .coverage ? "checkmark.seal.fill" : "paintpalette.fill")
+                    .frame(width: 40, height: 40)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .accessibilityLabel(engine.colorMode == .coverage ? "Ver color real" : "Ver cobertura")
 
             Button {
                 engine.showCloud.toggle()
@@ -133,11 +178,21 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity)
 
-            Button {
-                showScans = true
-            } label: {
-                Label("Mis escaneos", systemImage: "folder")
-                    .font(.footnote.weight(.semibold))
+            HStack(spacing: 24) {
+                Button {
+                    showReview = true
+                } label: {
+                    Label("Revisar 3D", systemImage: "rotate.3d")
+                        .font(.footnote.weight(.semibold))
+                }
+                .disabled(engine.isScanning || engine.pointCount == 0)
+
+                Button {
+                    showScans = true
+                } label: {
+                    Label("Mis escaneos", systemImage: "folder")
+                        .font(.footnote.weight(.semibold))
+                }
             }
         }
         .padding(16)
