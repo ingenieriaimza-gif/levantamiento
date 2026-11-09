@@ -13,6 +13,7 @@
     --sans: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); overflow: hidden; }
   #view { position: fixed; inset: 0; }
   header { position: fixed; top: 0; left: 0; right: 0; height: 52px; display: flex; align-items: center; gap: 18px;
@@ -128,9 +129,17 @@
 
 <section id="tab-escaneos" class="page" hidden>
   <div class="wrap">
-    <div class="row"><h2>Escaneos</h2><span class="muted" id="root-dir"></span>
+    <div class="row"><h2>Escaneos</h2>
       <button class="btn" id="open-root" type="button" style="margin-left:auto">Abrir carpeta</button>
       <button class="btn" id="refresh-scans" type="button">Actualizar lista</button></div>
+    <div class="card">
+      <div class="row"><div><div class="muted">Carpeta donde se guardan los escaneos</div>
+        <div id="root-dir" style="font-family:var(--mono)"></div></div>
+        <button class="btn primary" id="pick-root" type="button" style="margin-left:auto">Cambiar carpeta…</button></div>
+      <div class="row"><input id="root-input" type="text" placeholder="o escribe la ruta, p. ej. D:\Proyectos\Planta" style="flex:1;min-width:220px;background:#0f1318;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:13px var(--mono)">
+        <button class="btn" id="set-root" type="button">Usar esta ruta</button></div>
+      <div id="root-msg" class="muted"></div>
+    </div>
     <div id="scan-list" class="wrap"></div>
   </div>
 </section>
@@ -290,7 +299,6 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
-(function loop() { controls.update(); renderer.render(scene, camera); updateLabels(); requestAnimationFrame(loop); })();
 
 // ---------- medición
 let measures = [];           // {id, nombre, a:[x,y,z], b:[x,y,z], origen, real, calibra}
@@ -488,7 +496,8 @@ async function loadScans() {
     for (const s of d.escaneos) {
       const pills = el('div', { className: 'row' });
       pills.append(el('span', { className: 'pill', textContent: `${s.cuadros} cuadros` }));
-      if (s.descartado) pills.append(el('span', { className: 'pill', textContent: 'descartado' }));
+      if (s.en_curso) pills.append(el('span', { className: 'pill warn', textContent: 'escaneo en curso' }));
+      else if (s.descartado) pills.append(el('span', { className: 'pill', textContent: 'descartado' }));
       else if (s.procesado) pills.append(el('span', { className: 'pill ok', textContent: 'procesado' }));
       else pills.append(el('span', { className: 'pill warn', textContent: 'sin procesar' }));
       if (s.splat) pills.append(el('span', { className: 'pill ok', textContent: 'listo para Brush' }));
@@ -507,7 +516,7 @@ async function loadScans() {
       const open = el('button', { className: 'btn', type: 'button', textContent: 'Abrir carpeta' });
       open.onclick = () => post('/api/abrir', { ruta: s.carpeta });
       actions.append(open);
-      if (!s.descartado) {
+      if (!s.descartado && !s.en_curso) {
         const rp = el('button', { className: 'btn', type: 'button', textContent: s.procesado ? 'Procesar de nuevo' : 'Procesar' });
         rp.onclick = async () => {
           const r = await post('/api/reprocesar', { carpeta: s.carpeta });
@@ -525,6 +534,14 @@ async function loadScans() {
   }
 }
 $('refresh-scans').onclick = loadScans;
+async function applyRoot(promise) {
+  $('root-msg').textContent = 'Un momento…';
+  const r = await promise.catch(() => ({ ok: false, mensaje: 'No se pudo cambiar la carpeta' }));
+  $('root-msg').textContent = r.mensaje || '';
+  if (r.ok) loadScans();
+}
+$('pick-root').onclick = () => applyRoot(post('/api/carpeta/elegir'));
+$('set-root').onclick = () => applyRoot(post('/api/carpeta', { ruta: $('root-input').value }));
 $('open-root').onclick = () => post('/api/abrir', { ruta: '' });
 
 // ---------- actualizaciones
@@ -644,6 +661,13 @@ $('quit').onclick = async () => {
   await post('/api/salir').catch(() => {});
   document.body.replaceChildren(el('div', { className: 'page', textContent: 'El programa se cerró. Puedes cerrar esta ventana.' }));
 };
+
+// ---------- dibujo (al final, cuando todas las variables ya existen)
+(function loop() {
+  try { controls.update(); renderer.render(scene, camera); updateLabels(); }
+  catch (e) { console.error(e); }
+  requestAnimationFrame(loop);
+})();
 </script>
 </body>
 </html>

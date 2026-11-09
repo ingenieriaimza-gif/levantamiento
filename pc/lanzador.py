@@ -44,6 +44,19 @@ def open_window():
     webbrowser.open(URL)
 
 
+def default_folder():
+    """Carpeta de escaneos elegida en el programa (sin importar librerías: puede haber actualización pendiente)."""
+    cfg = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Levantamiento3D", "config.json")
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            path = json.load(f).get("carpeta")
+        if path:
+            return path
+    except (OSError, ValueError):
+        pass
+    return os.path.join(os.path.expanduser("~"), "Levantamientos3D")
+
+
 def apply_pending():
     """Aplica una actualización preparada en 'pendiente/' antes de cargar cualquier librería."""
     raiz = os.path.normpath(os.path.join(AQUI, ".."))
@@ -114,8 +127,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--esperar", action="store_true", help="esperar a que se cierre la versión anterior")
     ap.add_argument("--sin-ventana", action="store_true", help="no abrir la ventana (reinicio tras actualizar)")
-    ap.add_argument("--carpeta", default=os.path.join(os.path.expanduser("~"), "Levantamientos3D"))
+    ap.add_argument("--carpeta", default=None)
     args = ap.parse_args()
+    if not args.carpeta:
+        args.carpeta = default_folder()
 
     if args.esperar:
         for _ in range(40):

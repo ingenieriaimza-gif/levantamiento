@@ -369,8 +369,10 @@ def main():
             pass
     ap = argparse.ArgumentParser(description="Receptor de escaneos de la app 3D")
     ap.add_argument("--puerto", type=int, default=8765)
-    ap.add_argument("--carpeta", default=os.path.join(os.path.expanduser("~"), "Levantamientos3D"))
+    from gestion import default_folder
+    ap.add_argument("--carpeta", default=None, help="carpeta de escaneos (por defecto la elegida en el programa)")
     args = ap.parse_args()
+    args.carpeta = args.carpeta or default_folder()
     os.makedirs(args.carpeta, exist_ok=True)
 
     srv = Server(args.carpeta, args.puerto)

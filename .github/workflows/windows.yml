@@ -49,11 +49,20 @@ jobs:
           Copy-Item -Recurse pc dist\app\pc
           Copy-Item -Recurse tools dist\app\tools
           Remove-Item dist\app\pc\simular_iphone.py, dist\app\pc\*.bat -ErrorAction SilentlyContinue
+          Remove-Item -Recurse dist\app\pc\pruebas -ErrorAction SilentlyContinue
           $req = (python -c "import hashlib;print(hashlib.sha256(open('pc/requirements.txt','rb').read()).hexdigest()[:16])").Trim()
           $ver = @{ pc = [int]"${{ github.run_number }}"; req = $req } | ConvertTo-Json -Compress
           Set-Content -Encoding utf8NoBOM dist\app\version.json $ver
           Copy-Item dist\app\version.json dist\version.json
           Get-Content dist\version.json
+
+      - name: Prueba del visor (navegador simulado)
+        shell: pwsh
+        run: |
+          cd pc\pruebas
+          npm install --silent --no-audit --no-fund
+          node visor_prueba.mjs ..\web\visor.html
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Prueba de importación con el Python embebido
         shell: pwsh

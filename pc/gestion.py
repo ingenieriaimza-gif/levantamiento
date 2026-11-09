@@ -93,6 +93,47 @@ def ipa_info(path):
             "build": int(re.sub(r"\D", "", str(info.get("CFBundleVersion", "0"))) or 0)}
 
 
+CONFIG_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Levantamiento3D")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
+
+
+def load_config():
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(cfg):
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=1)
+
+
+def default_folder():
+    return load_config().get("carpeta") or os.path.join(os.path.expanduser("~"), "Levantamientos3D")
+
+
+def pick_folder_dialog(initial):
+    """Selector de carpetas de Windows (sin librerías extra: usa PowerShell y Windows Forms)."""
+    if not sys.platform.startswith("win"):
+        return None
+    ps = (
+        "Add-Type -AssemblyName System.Windows.Forms;"
+        "$o = New-Object System.Windows.Forms.Form; $o.TopMost = $true; $o.ShowInTaskbar = $false;"
+        "$f = New-Object System.Windows.Forms.FolderBrowserDialog;"
+        "$f.Description = 'Carpeta donde guardar los escaneos de Levantamiento 3D';"
+        "$f.ShowNewFolderButton = $true;"
+        f"$f.SelectedPath = '{initial.replace(chr(39), chr(39) * 2)}';"
+        "if ($f.ShowDialog($o) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($f.SelectedPath) }"
+    )
+    r = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", ps], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    path = r.stdout.strip()
+    return path or None
+
+
 def local_version():
     try:
         with open(VERSION_FILE, encoding="utf-8") as f:
@@ -182,6 +223,46 @@ class Gestion:
         self.root = root
         self.busy = None
 
+    # ---------------------------------------------------------- carpeta de escaneos
+
+    def _set_root(self, path):
+        path = os.path.abspath(os.path.expanduser(path))
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, ".prueba_escritura")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        self.root = path
+        self.server.root = path
+        cfg = load_config()
+        cfg["carpeta"] = path
+        save_config(cfg)
+        self.publish_app_status()
+        return path
+
+    async def carpeta_elegir(self, request):
+        loop = asyncio.get_running_loop()
+        path = await loop.run_in_executor(None, pick_folder_dialog, self.root)
+        if not path:
+            return web.json_response({"ok": False, "mensaje": "No se eligió ninguna carpeta"})
+        return await self._carpeta_aplicar(path)
+
+    async def carpeta_fijar(self, request):
+        data = await request.json()
+        return await self._carpeta_aplicar(str(data.get("ruta", "")).strip().strip('"'))
+
+    async def _carpeta_aplicar(self, path):
+        if not path:
+            return web.json_response({"ok": False, "mensaje": "Escribe una carpeta"})
+        if self.server.session is not None:
+            return web.json_response({"ok": False, "mensaje": "Termina el escaneo en curso antes de cambiar la carpeta"})
+        try:
+            p = self._set_root(path)
+        except OSError as e:
+            return web.json_response({"ok": False, "mensaje": f"No se puede usar esa carpeta: {e}"})
+        return web.json_response({"ok": True, "carpeta": p,
+                                  "mensaje": f"Los escaneos nuevos se guardarán en {p}"})
+
     # ---------------------------------------------------------- escaneos
 
     async def escaneos(self, request):
@@ -205,7 +286,9 @@ class Gestion:
                         frames = sum(1 for line in f if line.strip())
                 except OSError:
                     pass
+                live = self.server.session is not None and os.path.normpath(self.server.session.dir) == os.path.normpath(d)
                 items.append({
+                    "en_curso": live,
                     "nombre": name.replace("RGBD_", ""),
                     "carpeta": name,
                     "fecha": datetime.fromtimestamp(os.path.getmtime(d)).strftime("%Y-%m-%d %H:%M"),
@@ -234,6 +317,8 @@ class Gestion:
     async def reprocesar(self, request):
         data = await request.json()
         d = self._safe(data.get("carpeta", ""))
+        if self.server.session is not None and os.path.normpath(self.server.session.dir) == os.path.normpath(d):
+            return web.json_response({"ok": False, "mensaje": "Este escaneo sigue en curso: termínalo desde el iPhone"})
         if self.server.status.get("procesando"):
             return web.json_response({"ok": False, "mensaje": "Ya hay un procesamiento en curso"})
         escala = data.get("escala")
@@ -639,6 +724,8 @@ class Gestion:
         app.router.add_get("/api/ultima", self.ultima)
         app.router.add_post("/api/instalar_iphone", self.instalar_iphone)
         app.router.add_get("/api/modelo/{carpeta}", self.modelo)
+        app.router.add_post("/api/carpeta/elegir", self.carpeta_elegir)
+        app.router.add_post("/api/carpeta", self.carpeta_fijar)
         app.router.add_get("/api/medidas/{carpeta}", self.medidas_get)
         app.router.add_post("/api/medidas/{carpeta}", self.medidas_set)
         app.router.add_get("/app/info.json", self.app_info)          # visible para el iPhone en la red local

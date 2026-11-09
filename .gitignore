@@ -4,3 +4,4 @@ Payload/
 *.ipa
 xcodebuild.log
 .DS_Store
+node_modules/

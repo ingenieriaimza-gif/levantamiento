@@ -1,0 +1,1 @@
+{ "name": "pruebas-visor", "private": true, "type": "module", "dependencies": { "jsdom": "24.1.0" } }
