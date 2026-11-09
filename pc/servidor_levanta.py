@@ -35,6 +35,11 @@ import numpy as np
 AQUI = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.normpath(os.path.join(AQUI, "..", "tools"))
 sys.path.insert(0, TOOLS)
+sys.path.insert(0, AQUI)
+# en Windows: usar python.exe (no pythonw) para los procesos y sin abrir ventanas de consola
+_py = os.path.join(os.path.dirname(sys.executable), "python.exe")
+PYTHON = _py if os.path.exists(_py) else sys.executable
+NO_WINDOW = 0x08000000 if sys.platform.startswith("win") else 0
 
 import cv2  # noqa: E402
 import open3d as o3d  # noqa: E402
@@ -284,16 +289,18 @@ class Server:
     async def final_processing(self, sdir):
         self.status["procesando"] = True
         out = os.path.join(sdir, "resultado")
+        py = PYTHON
         cmds = [
-            [sys.executable, "-I", os.path.join(TOOLS, "procesar_rgbd.py"), sdir, "--salida", out,
+            [py, "-I", os.path.join(TOOLS, "procesar_rgbd.py"), sdir, "--salida", out,
              "--voxel", "0.004", "--dmax", "3.5", "--conf", "2", "--lecturas", "2",
              "--triangulos-textura", "1500000"],
-            [sys.executable, "-I", os.path.join(TOOLS, "exportar_splat.py"), sdir,
+            [py, "-I", os.path.join(TOOLS, "exportar_splat.py"), sdir,
              "--salida", os.path.join(sdir, "splat"), "--nube", os.path.join(out, "nube_fusionada.ply")],
         ]
         for cmd in cmds:
             proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
-                                                        stderr=asyncio.subprocess.STDOUT)
+                                                        stderr=asyncio.subprocess.STDOUT,
+                                                        creationflags=NO_WINDOW)
             async for line in proc.stdout:
                 text = line.decode(errors="replace").rstrip()
                 if text and not text.startswith("Warning"):
@@ -341,7 +348,10 @@ def main():
     os.makedirs(args.carpeta, exist_ok=True)
 
     srv = Server(args.carpeta, args.puerto)
-    app = web.Application(client_max_size=64 * 1024 * 1024)
+    from gestion import Gestion
+    gestion = Gestion(srv, args.carpeta)
+    app = web.Application(client_max_size=64 * 1024 * 1024, middlewares=[Gestion.solo_local])
+    gestion.register(app)
     app.router.add_get("/", srv.index)
     app.router.add_get("/estado", srv.estado)
     app.router.add_get("/ws", srv.ws_phone)

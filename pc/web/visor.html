@@ -3,63 +3,144 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Levantamiento 3D — PC</title>
+<title>Levantamiento 3D</title>
+<link rel="icon" href="/web/icono.png">
 <style>
   :root {
-    --bg: #0e1115; --panel: rgba(22, 26, 32, 0.86); --line: #2a313b;
+    --bg: #0e1115; --panel: rgba(22, 26, 32, 0.92); --solid: #161a20; --line: #2a313b;
     --fg: #e8ecf1; --muted: #8b95a3; --accent: #f5a524; --ok: #3fcf6e; --bad: #f0584a;
     --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
-    --sans: "Segoe UI", system-ui, sans-serif;
+    --sans: "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
   }
-  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); overflow: hidden; }
   #view { position: fixed; inset: 0; }
-  .panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
-           backdrop-filter: blur(8px); padding: 14px 16px; }
-  #top { top: 16px; left: 16px; right: 16px; display: flex; gap: 22px; align-items: center; flex-wrap: wrap; }
-  #top h1 { margin: 0; font-size: 16px; letter-spacing: .02em; }
+  header { position: fixed; top: 0; left: 0; right: 0; height: 52px; display: flex; align-items: center; gap: 18px;
+           padding: 0 16px; background: var(--solid); border-bottom: 1px solid var(--line); z-index: 5; }
+  header h1 { margin: 0; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  header h1 img { width: 22px; height: 22px; border-radius: 5px; }
+  nav { display: flex; gap: 4px; }
+  nav button { background: transparent; border: 0; color: var(--muted); padding: 8px 14px; border-radius: 8px; font: inherit; cursor: pointer; }
+  nav button[aria-selected="true"] { background: #232a33; color: var(--fg); }
+  nav button:hover { color: var(--fg); }
+  .conn { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  #dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
+  #dot.on { background: var(--ok); }
+  .panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(8px); padding: 14px 16px; }
+  #stats { top: 66px; left: 16px; display: flex; gap: 22px; }
   .stat { display: flex; flex-direction: column; }
   .stat b { font: 600 20px/1.1 var(--mono); font-variant-numeric: tabular-nums; }
   .stat span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
-  #dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); display: inline-block; margin-right: 6px; }
-  #dot.on { background: var(--ok); }
-  #log { bottom: 16px; left: 16px; width: min(560px, calc(100% - 64px)); max-height: 30vh; overflow: auto;
-         font: 12px/1.5 var(--mono); color: var(--muted); }
+  #viewbtns { top: 66px; right: 16px; display: flex; gap: 8px; padding: 10px; }
+  #log { bottom: 16px; left: 16px; width: min(560px, calc(100% - 340px)); max-height: 28vh; overflow: auto; font: 12px/1.5 var(--mono); color: var(--muted); }
   #log div:last-child { color: var(--fg); }
   #ips { bottom: 16px; right: 16px; text-align: right; }
   #ips b { font: 600 18px var(--mono); color: var(--accent); display: block; }
   #ips span { color: var(--muted); font-size: 12px; }
-  .btns { margin-left: auto; display: flex; gap: 8px; }
-  button { background: #1d232b; color: var(--fg); border: 1px solid var(--line); border-radius: 8px;
-           padding: 7px 12px; font: inherit; cursor: pointer; }
-  button:hover { border-color: var(--accent); }
+  button.btn { background: #1d232b; color: var(--fg); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px; font: inherit; cursor: pointer; }
+  button.btn:hover:not(:disabled) { border-color: var(--accent); }
+  button.btn.primary { background: var(--accent); color: #1a1205; border-color: var(--accent); font-weight: 600; }
+  button.btn:disabled { opacity: .45; cursor: default; }
   button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .page { position: fixed; top: 52px; left: 0; right: 0; bottom: 0; background: var(--bg); overflow: auto; padding: 24px; z-index: 4; }
+  .wrap { max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  .page h2 { margin: 0; font-size: 20px; }
+  .muted { color: var(--muted); }
+  .card { background: var(--solid); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .scan-title { font-weight: 600; font-family: var(--mono); }
+  .pill { font-size: 11px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+  .pill.ok { color: var(--ok); border-color: rgba(63,207,110,.4); }
+  .pill.warn { color: var(--accent); border-color: rgba(245,165,36,.4); }
+  .files { display: flex; gap: 8px; flex-wrap: wrap; }
+  .files button { font-family: var(--mono); font-size: 12px; }
+  .ver { font: 600 28px var(--mono); }
+  #upd-msg { min-height: 1.4em; }
 </style>
 </head>
 <body>
 <div id="view"></div>
-<div id="top" class="panel">
-  <h1><span id="dot"></span>Levantamiento 3D</h1>
-  <div class="stat"><b id="frames">0</b><span>cuadros</span></div>
-  <div class="stat"><b id="kf">0</b><span>fotos clave</span></div>
-  <div class="stat"><b id="tris">0</b><span>triángulos en vivo</span></div>
-  <div class="btns">
-    <button id="fit" type="button">Encuadrar</button>
-    <button id="top-view" type="button">Planta</button>
+<header>
+  <h1><img src="/web/icono.png" alt="">Levantamiento 3D</h1>
+  <nav role="tablist">
+    <button role="tab" aria-selected="true" data-tab="visor" type="button">Visor</button>
+    <button role="tab" aria-selected="false" data-tab="escaneos" type="button">Escaneos</button>
+    <button role="tab" aria-selected="false" data-tab="actualizaciones" type="button">Actualizaciones</button>
+  </nav>
+  <div class="conn"><span id="dot"></span><span id="conn-text">Conectando…</span></div>
+</header>
+
+<section id="tab-visor">
+  <div id="stats" class="panel">
+    <div class="stat"><b id="frames">0</b><span>cuadros</span></div>
+    <div class="stat"><b id="kf">0</b><span>fotos clave</span></div>
+    <div class="stat"><b id="tris">0</b><span>triángulos en vivo</span></div>
   </div>
-</div>
-<div id="log" class="panel"></div>
-<div id="ips" class="panel"><span>Dirección para la app</span><b id="addr">…</b><span id="addr2"></span></div>
+  <div id="viewbtns" class="panel">
+    <button class="btn" id="fit" type="button">Encuadrar</button>
+    <button class="btn" id="top-view" type="button">Planta</button>
+  </div>
+  <div id="log" class="panel"></div>
+  <div id="ips" class="panel"><span>Dirección para la app del iPhone</span><b id="addr">…</b><span id="addr2"></span></div>
+</section>
+
+<section id="tab-escaneos" class="page" hidden>
+  <div class="wrap">
+    <div class="row"><h2>Escaneos</h2><span class="muted" id="root-dir"></span>
+      <button class="btn" id="open-root" type="button" style="margin-left:auto">Abrir carpeta</button>
+      <button class="btn" id="refresh-scans" type="button">Actualizar lista</button></div>
+    <div id="scan-list" class="wrap"></div>
+  </div>
+</section>
+
+<section id="tab-actualizaciones" class="page" hidden>
+  <div class="wrap">
+    <h2>Actualizaciones</h2>
+    <div class="card">
+      <div class="row"><div><div class="muted">Programa de la PC</div><div class="ver" id="pc-ver">–</div></div>
+        <div style="margin-left:auto" class="muted" id="pc-new"></div></div>
+      <div class="row"><button class="btn primary" id="upd-pc" type="button" disabled>Actualizar programa</button>
+        <button class="btn" id="check" type="button">Buscar actualizaciones</button></div>
+    </div>
+    <div class="card">
+      <div class="row"><div><div class="muted">App del iPhone (3D)</div><div class="ver" id="app-ver">–</div></div>
+        <div style="margin-left:auto" class="muted" id="app-date"></div></div>
+      <div class="muted">Descarga la versión más reciente en tu carpeta Descargas y abre Sideloadly si está instalado.
+        Conecta el iPhone por cable, arrastra el archivo a Sideloadly y pulsa Start.</div>
+      <div class="row"><button class="btn primary" id="dl-app" type="button" disabled>Descargar app del iPhone</button></div>
+    </div>
+    <div id="upd-msg" class="muted"></div>
+    <div class="card">
+      <div class="muted">Cerrar el programa deja de recibir escaneos del iPhone. Para volver a abrirlo usa el acceso directo del escritorio.</div>
+      <div class="row"><button class="btn" id="quit" type="button">Cerrar el programa</button></div>
+    </div>
+  </div>
+</section>
 
 <script type="module">
 import * as THREE from './web/three.module.min.js';
 import { OrbitControls } from './web/OrbitControls.js';
 
-const view = document.getElementById('view');
+const $ = (id) => document.getElementById(id);
+const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Levanta': '1' },
+                                          body: JSON.stringify(body || {}) }).then(r => r.json());
+
+// ---------- pestañas
+const tabs = document.querySelectorAll('nav button');
+function show(name) {
+  tabs.forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
+  for (const t of ['visor', 'escaneos', 'actualizaciones']) $('tab-' + t).hidden = t !== name;
+  if (name === 'escaneos') loadScans();
+  if (name === 'actualizaciones') checkUpdates();
+}
+tabs.forEach(b => b.onclick = () => show(b.dataset.tab));
+
+// ---------- visor 3D
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(innerWidth, innerHeight);
 renderer.setClearColor(0x0e1115);
-view.appendChild(renderer.domElement);
+$('view').appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.01, 200);
 camera.position.set(2.5, 2, 2.5);
@@ -72,14 +153,13 @@ let mesh = null, firstMesh = true;
 
 function fit() {
   if (!mesh) return;
-  mesh.geometry.computeBoundingSphere();
   const s = mesh.geometry.boundingSphere;
   controls.target.copy(s.center);
   camera.position.copy(s.center).add(new THREE.Vector3(1, 0.8, 1).normalize().multiplyScalar(s.radius * 2.2));
-  grid.position.y = mesh.geometry.boundingBox ? mesh.geometry.boundingBox.min.y : 0;
+  grid.position.y = mesh.geometry.boundingBox.min.y;
 }
-document.getElementById('fit').onclick = fit;
-document.getElementById('top-view').onclick = () => {
+$('fit').onclick = fit;
+$('top-view').onclick = () => {
   if (!mesh) return;
   const s = mesh.geometry.boundingSphere;
   controls.target.copy(s.center);
@@ -87,10 +167,8 @@ document.getElementById('top-view').onclick = () => {
 };
 
 function log(t) {
-  const el = document.getElementById('log');
-  const d = document.createElement('div');
-  d.textContent = t;
-  el.appendChild(d);
+  const el = $('log'), d = document.createElement('div');
+  d.textContent = t; el.appendChild(d);
   while (el.children.length > 80) el.removeChild(el.firstChild);
   el.scrollTop = el.scrollHeight;
 }
@@ -104,27 +182,26 @@ function onMesh(h, buf, off) {
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.BufferAttribute(col, 3, true));
   g.setIndex(new THREE.BufferAttribute(idx, 1));
-  g.computeVertexNormals();
-  g.computeBoundingBox();
+  g.computeVertexNormals(); g.computeBoundingBox(); g.computeBoundingSphere();
   if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
   mesh = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
   scene.add(mesh);
-  document.getElementById('tris').textContent = nt.toLocaleString('es-MX');
+  $('tris').textContent = nt.toLocaleString('es-MX');
   if (firstMesh) { fit(); firstMesh = false; }
 }
 
 let lastMsg = '';
 function onStatus(s) {
-  document.getElementById('frames').textContent = s.cuadros.toLocaleString('es-MX');
-  document.getElementById('kf').textContent = s.clave.toLocaleString('es-MX');
+  $('frames').textContent = s.cuadros.toLocaleString('es-MX');
+  $('kf').textContent = s.clave.toLocaleString('es-MX');
   if (s.mensaje && s.mensaje !== lastMsg) { log(s.mensaje); lastMsg = s.mensaje; }
 }
 
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/visor`);
   ws.binaryType = 'arraybuffer';
-  ws.onopen = () => document.getElementById('dot').classList.add('on');
-  ws.onclose = () => { document.getElementById('dot').classList.remove('on'); setTimeout(connect, 2000); };
+  ws.onopen = () => { $('dot').classList.add('on'); $('conn-text').textContent = 'Programa activo'; };
+  ws.onclose = () => { $('dot').classList.remove('on'); $('conn-text').textContent = 'Reconectando…'; setTimeout(connect, 2000); };
   ws.onmessage = (ev) => {
     const dv = new DataView(ev.data);
     const kind = dv.getUint8(0), hl = dv.getUint32(1, true);
@@ -137,8 +214,8 @@ connect();
 
 fetch('/estado').then(r => r.json()).then(s => {
   const ips = s.ips || [];
-  document.getElementById('addr').textContent = ips.length ? `${ips[0]}:${s.puerto}` : 'sin red';
-  document.getElementById('addr2').textContent = ips.slice(1).map(ip => `${ip}:${s.puerto}`).join('  ·  ');
+  $('addr').textContent = ips.length ? `${ips[0]}:${s.puerto}` : 'sin red';
+  $('addr2').textContent = ips.slice(1).map(ip => `${ip}:${s.puerto}`).join('  ·  ');
 }).catch(() => {});
 
 addEventListener('resize', () => {
@@ -146,6 +223,112 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 (function loop() { controls.update(); renderer.render(scene, camera); requestAnimationFrame(loop); })();
+
+// ---------- escaneos
+function el(tag, props = {}, ...kids) {
+  const e = document.createElement(tag);
+  Object.assign(e, props);
+  for (const k of kids) e.append(k);
+  return e;
+}
+async function loadScans() {
+  const list = $('scan-list');
+  list.replaceChildren(el('div', { className: 'muted', textContent: 'Cargando…' }));
+  try {
+    const d = await fetch('/api/escaneos').then(r => r.json());
+    $('root-dir').textContent = d.carpeta;
+    list.replaceChildren();
+    if (!d.escaneos.length) {
+      list.append(el('div', { className: 'card' }, el('div', { className: 'muted',
+        textContent: 'Todavía no hay escaneos. En la app del iPhone activa Ajustes › Procesar en la PC › Enviar a la PC y empieza a escanear.' })));
+      return;
+    }
+    for (const s of d.escaneos) {
+      const pills = el('div', { className: 'row' });
+      pills.append(el('span', { className: 'pill', textContent: `${s.cuadros} cuadros` }));
+      if (s.descartado) pills.append(el('span', { className: 'pill', textContent: 'descartado' }));
+      else if (s.procesado) pills.append(el('span', { className: 'pill ok', textContent: 'procesado' }));
+      else pills.append(el('span', { className: 'pill warn', textContent: 'sin procesar' }));
+      if (s.splat) pills.append(el('span', { className: 'pill ok', textContent: 'listo para Brush' }));
+      const files = el('div', { className: 'files' });
+      for (const f of s.archivos) {
+        const b = el('button', { className: 'btn', type: 'button', textContent: `${f.nombre} · ${f.mb} MB` });
+        b.onclick = () => post('/api/abrir', { ruta: `${s.carpeta}/resultado/${f.nombre}` });
+        files.append(b);
+      }
+      const actions = el('div', { className: 'row' });
+      const open = el('button', { className: 'btn', type: 'button', textContent: 'Abrir carpeta' });
+      open.onclick = () => post('/api/abrir', { ruta: s.carpeta });
+      actions.append(open);
+      if (!s.descartado) {
+        const rp = el('button', { className: 'btn', type: 'button', textContent: s.procesado ? 'Procesar de nuevo' : 'Procesar' });
+        rp.onclick = async () => {
+          const r = await post('/api/reprocesar', { carpeta: s.carpeta });
+          rp.textContent = r.ok ? 'Procesando… (ver el registro en Visor)' : r.mensaje;
+          rp.disabled = true;
+        };
+        actions.append(rp);
+      }
+      list.append(el('div', { className: 'card' },
+        el('div', { className: 'row' }, el('span', { className: 'scan-title', textContent: s.nombre }),
+          el('span', { className: 'muted', textContent: s.fecha })), pills, files, actions));
+    }
+  } catch (e) {
+    list.replaceChildren(el('div', { className: 'card', textContent: 'No se pudo leer la carpeta de escaneos.' }));
+  }
+}
+$('refresh-scans').onclick = loadScans;
+$('open-root').onclick = () => post('/api/abrir', { ruta: '' });
+
+// ---------- actualizaciones
+async function checkUpdates() {
+  $('upd-msg').textContent = 'Buscando actualizaciones…';
+  const v = await fetch('/api/version').then(r => r.json()).catch(() => ({ pc: 0 }));
+  $('pc-ver').textContent = v.pc ? `versión ${v.pc}` : 'versión de desarrollo';
+  const u = await fetch('/api/actualizaciones').then(r => r.json()).catch(() => ({ ok: false, mensaje: 'Sin conexión' }));
+  if (!u.ok) { $('upd-msg').textContent = u.mensaje + ' (las actualizaciones necesitan internet).'; return; }
+  if (u.pc_disponible && u.pc_disponible > (v.pc || 0)) {
+    $('pc-new').textContent = `Disponible: versión ${u.pc_disponible} (${u.pc_fecha})` + (u.pc_instalador ? ' · requiere instalador completo' : '');
+    $('upd-pc').disabled = false;
+  } else {
+    $('pc-new').textContent = 'Tienes la versión más reciente';
+    $('upd-pc').disabled = true;
+  }
+  if (u.app_build) {
+    $('app-ver').textContent = `build ${u.app_build}`;
+    $('app-date').textContent = `publicada ${u.app_fecha}`;
+    $('dl-app').disabled = false;
+  }
+  $('upd-msg').textContent = '';
+}
+$('check').onclick = checkUpdates;
+$('upd-pc').onclick = async () => {
+  $('upd-pc').disabled = true;
+  $('upd-msg').textContent = 'Descargando la actualización…';
+  const r = await post('/api/actualizar_pc');
+  $('upd-msg').textContent = r.mensaje;
+  if (r.ok) {
+    const t0 = Date.now();
+    const wait = setInterval(async () => {
+      try {
+        const ok = await fetch('/estado', { cache: 'no-store' }).then(x => x.ok);
+        if (ok && Date.now() - t0 > 4000) { clearInterval(wait); location.reload(); }
+      } catch (e) { /* reiniciando */ }
+    }, 1500);
+  }
+};
+$('dl-app').onclick = async () => {
+  $('dl-app').disabled = true;
+  $('upd-msg').textContent = 'Descargando la app del iPhone…';
+  const r = await post('/api/descargar_app');
+  $('upd-msg').textContent = r.ok ? `${r.mensaje}.` + (r.sideloadly ? ' Se abrió Sideloadly.' : ' Abre Sideloadly y arrastra el archivo.') : r.mensaje;
+  $('dl-app').disabled = false;
+};
+$('quit').onclick = async () => {
+  if ($('quit').dataset.confirm !== '1') { $('quit').dataset.confirm = '1'; $('quit').textContent = 'Pulsa otra vez para cerrar'; return; }
+  await post('/api/salir').catch(() => {});
+  document.body.replaceChildren(el('div', { className: 'page', textContent: 'El programa se cerró. Puedes cerrar esta ventana.' }));
+};
 </script>
 </body>
 </html>

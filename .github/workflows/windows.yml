@@ -1,0 +1,130 @@
+name: Instalador Windows
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pc/**"
+      - "tools/**"
+      - "installer/**"
+      - ".github/workflows/windows.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      PYVER: "3.12.10"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYVER }}
+
+      - name: Python embebido + librerías
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force dist\app | Out-Null
+          Invoke-WebRequest "https://www.python.org/ftp/python/$env:PYVER/python-$env:PYVER-embed-amd64.zip" -OutFile py.zip
+          Expand-Archive py.zip -DestinationPath dist\app\python
+          $pth = Get-ChildItem dist\app\python\python*._pth | Select-Object -First 1
+          $lines = (Get-Content $pth) -replace '^#\s*import site', 'import site'
+          $lines += 'Lib\site-packages'
+          Set-Content $pth $lines
+          Get-Content $pth
+          python -m pip install --upgrade pip
+          python -m pip install -r pc\requirements.txt --target dist\app\python\Lib\site-packages --no-warn-script-location
+          Invoke-WebRequest "https://aka.ms/vs/17/release/vc_redist.x64.exe" -OutFile dist\vc_redist.x64.exe
+
+      - name: Código y versión
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Copy-Item -Recurse pc dist\app\pc
+          Copy-Item -Recurse tools dist\app\tools
+          Remove-Item dist\app\pc\simular_iphone.py, dist\app\pc\*.bat -ErrorAction SilentlyContinue
+          $req = (python -c "import hashlib;print(hashlib.sha256(open('pc/requirements.txt','rb').read()).hexdigest()[:16])").Trim()
+          $ver = @{ pc = [int]"${{ github.run_number }}"; req = $req } | ConvertTo-Json -Compress
+          Set-Content -Encoding utf8NoBOM dist\app\version.json $ver
+          Copy-Item dist\app\version.json dist\version.json
+          Get-Content dist\version.json
+
+      - name: Prueba de importación con el Python embebido
+        shell: pwsh
+        run: |
+          dist\app\python\python.exe -I -c "import open3d, numpy, cv2, aiohttp, zeroconf, pye57, trimesh, scipy, PIL; from pxr import Usd, UsdUtils; print('open3d', open3d.__version__, 'numpy', numpy.__version__)"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Prueba de punta a punta (iPhone simulado)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $py = "dist\app\python\python.exe"
+          $srv = Start-Process $py -ArgumentList "-I", "dist\app\pc\servidor_levanta.py", "--carpeta", "$PWD\prueba" -PassThru -RedirectStandardOutput srv.log -RedirectStandardError srv.err
+          for ($i = 0; $i -lt 60; $i++) { try { Invoke-RestMethod http://localhost:8765/estado | Out-Null; break } catch { Start-Sleep 2 } }
+          & $py -I tools\sintetico.py --salida sim\paquete --cuadros 60
+          & $py -I pc\simular_iphone.py sim\paquete --fps 15
+          $ok = $false
+          for ($i = 0; $i -lt 240; $i++) {
+            $s = Invoke-RestMethod http://localhost:8765/estado
+            if (-not $s.procesando -and ($s.resultados.Count -gt 0 -or $s.mensaje -like "*falló*")) { $ok = $s.resultados.Count -gt 0; break }
+            Start-Sleep 5
+          }
+          Get-Content srv.log -Tail 25
+          $res = "prueba\RGBD_prueba_simulada\resultado"
+          Get-ChildItem $res | Format-Table Name, Length
+          Get-Content "$res\reporte.txt"
+          foreach ($f in "nube_fusionada.e57", "malla_solidworks.stl", "modelo_texturizado.usdz", "modelo_texturizado.glb") {
+            if (-not (Test-Path "$res\$f")) { Write-Error "Falta $f" }
+          }
+          if (-not (Test-Path "prueba\RGBD_prueba_simulada\splat\sparse\0\images.txt")) { Write-Error "Faltan datos para splat" }
+          Stop-Process -Id $srv.Id -Force
+          if (-not $ok) { Get-Content srv.err -Tail 40; exit 1 }
+
+      - name: Compilar instalador
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress | Out-Null }
+          & $iscc /Qp "/DMyVersion=${{ github.run_number }}" installer\levantamiento.iss
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Get-ChildItem dist\Levantamiento3D_Setup.exe | Format-Table Name, Length
+
+      - name: Probar el instalador (instalación silenciosa y arranque)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $p = Start-Process dist\Levantamiento3D_Setup.exe -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=C:\L3D", "/LOG=install.log" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { Get-Content install.log -Tail 40; exit 1 }
+          Start-Process C:\L3D\python\pythonw.exe -ArgumentList "-I", "C:\L3D\pc\lanzador.py", "--sin-ventana", "--carpeta", "$PWD\prueba2"
+          $up = $false
+          for ($i = 0; $i -lt 60; $i++) { try { $e = Invoke-RestMethod http://localhost:8765/estado; $up = $true; break } catch { Start-Sleep 2 } }
+          if (-not $up) { Get-Content "$PWD\prueba2\registro.txt" -ErrorAction SilentlyContinue; exit 1 }
+          Invoke-RestMethod http://localhost:8765/api/version
+          netsh advfirewall firewall show rule name="Levantamiento 3D" | Select-String "Puerto|Port|Programa|Program" | Select-Object -First 6
+
+      - name: Paquete de actualización
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force upd | Out-Null
+          Copy-Item -Recurse dist\app\pc upd\pc
+          Copy-Item -Recurse dist\app\tools upd\tools
+          Get-ChildItem upd -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
+          Compress-Archive -Path upd\pc, upd\tools -DestinationPath dist\actualizacion_pc.zip
+
+      - name: Publicar versión
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: pc-${{ github.run_number }}
+          name: Programa PC ${{ github.run_number }}
+          body: "Levantamiento 3D para Windows. Instala con Levantamiento3D_Setup.exe; las siguientes versiones se aplican desde la pestaña Actualizaciones del programa."
+          files: |
+            dist/Levantamiento3D_Setup.exe
+            dist/actualizacion_pc.zip
+            dist/version.json

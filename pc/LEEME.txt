@@ -1,25 +1,22 @@
 LEVANTAMIENTO 3D - PROGRAMA DE LA PC (Windows)
 ==============================================
 
-INSTALAR (una sola vez)
-1. Instala Python 3.12 desde https://www.python.org/downloads/
-   En el instalador marca "Add python.exe to PATH".
-2. Doble clic en  instalar.bat  (tarda unos minutos).
+INSTALAR
+Descarga y abre Levantamiento3D_Setup.exe (sección Releases del repositorio, versión "Programa PC").
+Trae todo incluido (Python y librerías) y configura el firewall. Crea el acceso directo
+"Levantamiento 3D" en el escritorio.
 
 USAR
-1. Doble clic en  iniciar.bat . Se abre el visor en el navegador
-   (http://localhost:8765) y la ventana negra muestra la dirección de la PC.
-   La primera vez, Windows pregunta si permites la red: marca privadas Y públicas.
-2. Conecta el iPhone y la PC a la misma red local, de cualquiera de estas formas:
+1. Abre "Levantamiento 3D". Se abre la ventana del programa con tres secciones:
+   - Visor: el modelo creciendo en vivo y la dirección de la PC para la app.
+   - Escaneos: tus levantamientos, sus archivos y botones para abrirlos o procesarlos de nuevo.
+   - Actualizaciones: actualizar el programa y descargar la app nueva del iPhone.
+2. Conecta el iPhone y la PC a la misma red local (no se necesita internet):
    - el mismo Wi-Fi;
    - hotspot del iPhone (Compartir internet) con la PC conectada, por Wi-Fi o por cable USB;
    - "Zona con cobertura inalámbrica móvil" de Windows con el iPhone conectado.
-   No se necesita internet.
 3. En la app 3D: Ajustes > Procesar en la PC > activa "Enviar a la PC".
-   La app encuentra la PC sola; si no, escribe la dirección que muestra la ventana negra.
-4. Escanea. En el iPhone verás la superficie fusionada en verde sobre la cámara;
-   en la PC, el modelo creciendo en el visor.
-5. Pulsa "Terminar y procesar en la PC". Los resultados quedan en
+4. Escanea y pulsa "Terminar y procesar en la PC". Los resultados quedan en
    C:\Users\<tu usuario>\Levantamientos3D\RGBD_<fecha>\resultado
      nube_fusionada.e57       -> ReCap / Navisworks
      malla_solidworks.stl     -> SolidWorks (milímetros)
@@ -29,5 +26,8 @@ USAR
 
 SI LA APP NO CONECTA
 - Revisa que los dos estén en la misma red.
-- Ejecuta permitir_firewall.bat como administrador (clic derecho).
 - En el iPhone: Ajustes > Privacidad y seguridad > Red local > 3D activado.
+- Si persiste, escribe en la app la dirección que muestra la sección Visor.
+
+DESARROLLO (sin instalador)
+instalar.bat / iniciar.bat preparan y abren el programa con un Python 3.12 propio.

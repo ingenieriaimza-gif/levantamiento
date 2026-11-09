@@ -3,6 +3,10 @@ name: Compilar Levanta
 on:
   push:
     branches: [main]
+    paths:
+      - "Levanta/**"
+      - "project.yml"
+      - ".github/workflows/build.yml"
   workflow_dispatch:
 
 permissions:
