@@ -20,6 +20,11 @@ final class KeyframeRecorder {
     private var jsonl: FileHandle?
     private var lastPose: simd_float4x4?
     private var lastTime: TimeInterval = 0
+    // selección por nitidez: al cumplirse el avance se espera hasta 0.5 s la foto más nítida
+    private var waitingSince: TimeInterval?
+    private var recentBestSharpness: Float = 0
+    let sharpnessWindow: TimeInterval = 0.5
+    let sharpnessRatio: Float = 0.8
     private var depthW = 0, depthH = 0, imgW = 0, imgH = 0
 
     private(set) var directory: URL?
@@ -50,6 +55,8 @@ final class KeyframeRecorder {
         count = 0
         lastPose = nil
         lastTime = 0
+        waitingSince = nil
+        recentBestSharpness = 0
     }
 
     /// Termina la sesión y devuelve la carpeta (o nil si no había nada).
@@ -111,6 +118,15 @@ final class KeyframeRecorder {
             if ang > .pi { ang = 2 * .pi - ang }
             if dp < minTranslation && ang < minRotation { return false }
         }
+
+        // Ya toca foto: tomar esta solo si es nítida comparada con las recientes,
+        // o si ya se esperó demasiado (para no dejar huecos).
+        let sharp = FrameCodec.sharpness(frame.capturedImage)
+        recentBestSharpness = max(sharp, recentBestSharpness * 0.97)
+        if waitingSince == nil { waitingSince = frame.timestamp }
+        let waited = frame.timestamp - (waitingSince ?? frame.timestamp)
+        if sharp < sharpnessRatio * recentBestSharpness && waited < sharpnessWindow { return false }
+        waitingSince = nil
 
         // Foto
         let image = frame.capturedImage

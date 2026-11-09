@@ -15,7 +15,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     @Published var statusMessage: String?
     @Published var lidarAvailable = true
     @Published var showCloud = true
-    @Published var colorMode: ColorMode = .coverage
+    @Published var colorMode: ColorMode = .coverage {
+        didSet { tintLiveMesh = colorMode == .coverage }
+    }
     /// Distancia (m) a lo que apunta el centro de la pantalla; nil si no hay lectura.
     @Published var centerDistance: Float?
 
@@ -42,6 +44,18 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     /// Guardar cuadros RGB-D (foto + profundidad + posición) para la fusión de alta calidad.
     @Published var recordRGBD = true
     @Published var keyframeCount = 0
+    /// Exposición corta y balance de blancos fijos al escanear (fotos nítidas, color parejo).
+    @Published var sharpCapture = true
+    /// Te estás moviendo o girando demasiado rápido para fotos nítidas.
+    @Published var tooFast = false
+    /// Enviar el escaneo a la PC por red local.
+    @Published var streamToPC = false {
+        didSet { link.setEnabled(streamToPC) }
+    }
+    @Published var liveMeshTriangles = 0
+
+    let link = PCLink()
+    let liveMeshNode = SCNNode()
 
     let pointsNode = SCNNode()
     private(set) var sceneView: ARSCNView?
@@ -65,6 +79,16 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var previewTimer: Timer?
     private var previewBusy = false
     private var lastDistanceTime: TimeInterval = 0
+    // movimiento y envío a la PC (solo en `queue`)
+    private var lastMotionPose: simd_float4x4?
+    private var lastMotionTime: TimeInterval = 0
+    private var speedEMA: Float = 0
+    private var turnEMA: Float = 0
+    private var tooFastState = false
+    private var lastStreamTime: TimeInterval = 0
+    private var streamIndex = 0
+    private var sessionName = ""        // solo en el hilo principal
+    private var tintLiveMesh = true
 
     private let maxVoxels = 6_000_000
     private let processInterval: TimeInterval = 0.09   // ~11 cuadros por segundo
@@ -78,6 +102,14 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         view.automaticallyUpdatesLighting = false
         view.rendersCameraGrain = false
         view.scene.rootNode.addChildNode(pointsNode)
+        liveMeshNode.renderingOrder = -1
+        view.scene.rootNode.addChildNode(liveMeshNode)
+        link.onMesh = { [weak self] data in self?.receiveLiveMesh(data) }
+        link.onConnected = { [weak self] in
+            guard let self, self.isScanning else { return }
+            let name = self.currentSessionName()
+            self.link.sendStart(name: name)
+        }
         view.session.delegate = self
         view.session.delegateQueue = queue
         sceneView = view
@@ -108,6 +140,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     func toggleScanning() {
         let start = !isScanning
         isScanning = start
+        if start && sharpCapture { CameraTuning.apply(sharp: true) }
+        if start && link.isConnected { link.sendStart(name: currentSessionName()) }
         let voxel = Float(voxelSizeCm / 100.0)
         let depth = Float(maxDepth)
         let conf: UInt8 = highConfidenceOnly ? 2 : 1
@@ -137,9 +171,22 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     func reset() {
+        if link.isConnected, let d = FrameCodec.pack(kind: 4, header: [:]) {
+            link.send(d, important: true)            // la PC descarta lo recibido de este escaneo
+        }
         isScanning = false
         pointCount = 0
         pointsNode.geometry = nil
+        liveMeshNode.geometry = nil
+        liveMeshTriangles = 0
+        tooFast = false
+        CameraTuning.apply(sharp: false)
+        sessionName = ""
+        pointsNode.isHidden = false
+        queue.async {
+            self.streamIndex = 0
+            self.lastMotionPose = nil
+        }
         let voxel = Float(voxelSizeCm / 100.0)
         queue.async {
             self.scanning = false
@@ -171,12 +218,87 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         guard frame.timestamp - lastProcessTime >= processInterval else { return }
         lastProcessTime = frame.timestamp
         integrate(frame)
-        if activeRecordRGBD && recorder.isActive {
-            let chosen = activeSmooth ? (frame.smoothedSceneDepth ?? frame.sceneDepth)
-                                      : (frame.sceneDepth ?? frame.smoothedSceneDepth)
-            if let depth = chosen, recorder.consider(frame: frame, depth: depth) {
-                let n = recorder.count
-                DispatchQueue.main.async { self.keyframeCount = n }
+        updateMotion(frame)
+        let chosen = activeSmooth ? (frame.smoothedSceneDepth ?? frame.sceneDepth)
+                                  : (frame.sceneDepth ?? frame.smoothedSceneDepth)
+        var savedKeyframe = false
+        if activeRecordRGBD && recorder.isActive, let depth = chosen,
+           recorder.consider(frame: frame, depth: depth) {
+            savedKeyframe = true
+            let n = recorder.count
+            DispatchQueue.main.async { self.keyframeCount = n }
+        }
+        if link.isConnected, let depth = chosen,
+           savedKeyframe || frame.timestamp - lastStreamTime >= 0.25 {
+            lastStreamTime = frame.timestamp
+            streamFrame(frame, depth: depth, keyframe: savedKeyframe)
+        }
+    }
+
+    /// Velocidad de avance y de giro (suavizadas) para avisar cuando hay que ir más despacio.
+    private func updateMotion(_ frame: ARFrame) {
+        let T = frame.camera.transform
+        defer { lastMotionPose = T; lastMotionTime = frame.timestamp }
+        guard let L = lastMotionPose else { return }
+        let dt = Float(frame.timestamp - lastMotionTime)
+        guard dt > 0.01 && dt < 1 else { return }
+        let dp = simd_distance(SIMD3<Float>(T.columns.3.x, T.columns.3.y, T.columns.3.z),
+                               SIMD3<Float>(L.columns.3.x, L.columns.3.y, L.columns.3.z))
+        var ang = (simd_quatf(L).inverse * simd_quatf(T)).angle
+        if ang > .pi { ang = 2 * .pi - ang }
+        speedEMA = 0.7 * speedEMA + 0.3 * (dp / dt)
+        turnEMA = 0.7 * turnEMA + 0.3 * (ang / dt * 180 / .pi)
+        let fast = speedEMA > 0.45 || turnEMA > 32
+        let calm = speedEMA < 0.30 && turnEMA < 22
+        if fast != tooFastState && (fast || calm) {
+            tooFastState = fast
+            DispatchQueue.main.async { self.tooFast = fast }
+        }
+    }
+
+    /// Envía un cuadro completo (foto a resolución completa, profundidad, confianza y posición) a la PC.
+    private func streamFrame(_ frame: ARFrame, depth: ARDepthData, keyframe: Bool) {
+        guard let jpg = FrameCodec.jpeg(frame, scale: 1.0, quality: 0.85),
+              let dc = FrameCodec.depthAndConfidence(depth) else { return }
+        var h = FrameCodec.header(frame, index: streamIndex, scale: 1.0)
+        h["dw"] = dc.w
+        h["dh"] = dc.h
+        h["kf"] = keyframe
+        h["nj"] = jpg.count
+        h["nd"] = dc.depth.count
+        h["nc"] = dc.conf.count
+        guard let msg = FrameCodec.pack(kind: 1, header: h, payload: [jpg, dc.depth, dc.conf]) else { return }
+        streamIndex += 1
+        link.send(msg, important: keyframe)
+    }
+
+    private func currentSessionName() -> String {
+        if sessionName.isEmpty {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "es_MX")
+            f.dateFormat = "yyyy-MM-dd_HH-mm-ss"
+            sessionName = f.string(from: Date())
+        }
+        return sessionName
+    }
+
+    /// Termina el escaneo y le pide a la PC que procese todo en alta calidad.
+    func finishOnPC() {
+        if isScanning { toggleScanning() }
+        link.sendEnd()
+        sessionName = ""
+        queue.async { self.streamIndex = 0 }
+    }
+
+    private func receiveLiveMesh(_ data: Data) {
+        let tint = tintLiveMesh
+        DispatchQueue.global(qos: .userInitiated).async {
+            let g = FrameCodec.liveMeshGeometry(data, tint: tint)
+            let tris = g?.elements.first?.primitiveCount ?? 0
+            DispatchQueue.main.async {
+                self.liveMeshNode.geometry = g
+                self.liveMeshTriangles = tris
+                self.pointsNode.isHidden = g != nil
             }
         }
     }

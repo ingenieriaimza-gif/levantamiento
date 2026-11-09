@@ -12,7 +12,8 @@ Protocolo (WebSocket binario en /ws):
   mensaje = [1 byte tipo][4 bytes longitud del encabezado, little-endian][encabezado JSON][datos]
   iPhone -> PC:  1 cuadro  {i,t,fx,fy,cx,cy,w,h,T[16],dw,dh,kf,nj,nd,nc} + JPEG + profundidad(mm,u16) + confianza(u8)
                  2 inicio  {nombre, dispositivo, sistema}
-                 3 fin     {}
+                 3 fin     {}  (procesar en alta calidad)
+                 4 descartar {}  (el usuario borró el escaneo en el iPhone)
   PC -> iPhone:  10 malla  {nv,nt} + float32 xyz*nv + uint8 rgb*nv + uint32 índices*nt*3
                  11 estado {cuadros, clave, mensaje, procesando}
 """
@@ -40,7 +41,7 @@ import open3d as o3d  # noqa: E402
 from aiohttp import WSMsgType, web  # noqa: E402
 
 ARKIT_TO_CV = np.diag([1.0, -1.0, -1.0, 1.0])
-MSG_FRAME, MSG_START, MSG_END = 1, 2, 3
+MSG_FRAME, MSG_START, MSG_END, MSG_DISCARD = 1, 2, 3, 4
 MSG_MESH, MSG_STATUS = 10, 11
 
 
@@ -228,6 +229,17 @@ class Server:
                     await loop.run_in_executor(self.pool, self.session.add_frame, h, jpeg, depth, conf)
                     self.status["cuadros"] = self.session.frames
                     self.status["clave"] = self.session.keyframes
+                elif kind == MSG_DISCARD and self.session is not None:
+                    sess = self.session
+                    self.session = None
+                    self.last_mesh = None
+                    await loop.run_in_executor(self.pool, sess.close)
+                    try:
+                        os.replace(sess.dir, sess.dir + "_descartado")
+                    except OSError:
+                        pass
+                    self.status.update(cuadros=0, clave=0)
+                    await self.send_status("Escaneo descartado desde el iPhone")
                 elif kind == MSG_END and self.session is not None:
                     sess = self.session
                     self.session = None

@@ -6,8 +6,8 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.0"
-    MARKETING_VERSION: "0.4.1"
-    CURRENT_PROJECT_VERSION: "5"
+    MARKETING_VERSION: "0.5.0"
+    CURRENT_PROJECT_VERSION: "6"
 targets:
   Levanta:
     type: application
@@ -38,3 +38,9 @@ targets:
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         UIStatusBarStyle: UIStatusBarStyleLightContent
+        NSLocalNetworkUsageDescription: 3D se conecta al programa Levantamiento 3D de tu PC en la red local para enviar el escaneo y ver el modelo en vivo.
+        NSBonjourServices:
+          - _levanta._tcp
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          NSAllowsArbitraryLoads: true

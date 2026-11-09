@@ -21,7 +21,18 @@ struct ContentView: View {
 
             VStack(spacing: 12) {
                 topBar
+                if engine.streamToPC {
+                    PCStatusPill(link: engine.link, triangles: engine.liveMeshTriangles)
+                }
                 Spacer()
+                if engine.isScanning && engine.tooFast {
+                    Label("Más despacio para fotos nítidas", systemImage: "tortoise.fill")
+                        .font(.subheadline.weight(.bold))
+                        .padding(.horizontal, 16).padding(.vertical, 10)
+                        .background(Color(red: 0.95, green: 0.35, blue: 0.25).opacity(0.92), in: Capsule())
+                        .foregroundStyle(.white)
+                        .transition(.opacity)
+                }
                 if let msg = engine.statusMessage {
                     Text(msg)
                         .font(.footnote.weight(.semibold))
@@ -183,6 +194,10 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity)
 
+            if engine.streamToPC {
+                PCFinishButton(engine: engine, link: engine.link)
+            }
+
             HStack(spacing: 24) {
                 Button {
                     showReview = true
@@ -294,6 +309,7 @@ struct SettingsView: View {
                     Toggle("Solo puntos de alta confianza", isOn: $engine.highConfidenceOnly)
                     Toggle("Profundidad suavizada", isOn: $engine.smoothDepth)
                     Toggle("Guardar cuadros RGB-D (máxima calidad)", isOn: $engine.recordRGBD)
+                    Toggle("Fotos nítidas (exposición y color fijos)", isOn: $engine.sharpCapture)
                     Stepper("Lecturas mínimas por punto: \(engine.minObservations)",
                             value: $engine.minObservations, in: 1...5)
                         .onChange(of: engine.minObservations) { _, v in
@@ -302,8 +318,10 @@ struct SettingsView: View {
                 } header: {
                     Text("Precisión y ruido")
                 } footer: {
-                    Text("El LiDAR es más preciso de cerca: a más de 3–4 m aumenta el error. Pedir 2 o más lecturas por punto elimina destellos y puntos sueltos. La profundidad suavizada da menos ruido pero redondea bordes y detalles finos.")
+                    Text("El LiDAR es más preciso de cerca: a más de 3–4 m aumenta el error. Pedir 2 o más lecturas por punto elimina destellos y puntos sueltos. La profundidad suavizada da menos ruido pero redondea bordes y detalles finos. Fotos nítidas fija una exposición corta al empezar a escanear: menos barrido al moverte y el mismo color en todas las fotos.")
                 }
+
+                PCSettingsSection(engine: engine, link: engine.link)
             }
             .navigationTitle("Ajustes")
             .navigationBarTitleDisplayMode(.inline)
@@ -357,6 +375,94 @@ struct ScansView: View {
                 }
             }
             .onAppear { scans = ScanStore.list() }
+        }
+    }
+}
+
+
+// MARK: - PC (red local)
+
+struct PCStatusPill: View {
+    @ObservedObject var link: PCLink
+    let triangles: Int
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(link.state.text).font(.footnote.weight(.semibold)).lineLimit(1)
+                if case .connected = link.state {
+                    Text(detail).font(.caption2.monospaced()).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .foregroundStyle(.white)
+    }
+
+    private var icon: String {
+        switch link.state {
+        case .connected: return "desktopcomputer"
+        case .failed: return "exclamationmark.triangle.fill"
+        default: return "antenna.radiowaves.left.and.right"
+        }
+    }
+
+    private var detail: String {
+        var parts = ["PC: \(link.pcFrames) cuadros"]
+        if triangles > 0 { parts.append("superficie \(triangles / 1000) k triángulos") }
+        if link.pcProcessing { parts = [link.pcMessage] }
+        return parts.joined(separator: " · ")
+    }
+}
+
+struct PCFinishButton: View {
+    @ObservedObject var engine: ScanEngine
+    @ObservedObject var link: PCLink
+    @State private var confirm = false
+
+    var body: some View {
+        Button {
+            confirm = true
+        } label: {
+            Label(link.pcProcessing ? "La PC está procesando…" : "Terminar y procesar en la PC",
+                  systemImage: "checkmark.circle.fill")
+                .font(.subheadline.weight(.semibold))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
+        }
+        .disabled(!link.isConnected || link.pcProcessing || link.pcFrames == 0)
+        .confirmationDialog("¿Terminar el escaneo?", isPresented: $confirm, titleVisibility: .visible) {
+            Button("Terminar y procesar") { engine.finishOnPC() }
+            Button("Seguir escaneando", role: .cancel) {}
+        } message: {
+            Text("La PC generará la nube E57, el STL para SolidWorks, el modelo con fotos y los datos para Gaussian Splatting.")
+        }
+    }
+}
+
+struct PCSettingsSection: View {
+    @ObservedObject var engine: ScanEngine
+    @ObservedObject var link: PCLink
+
+    var body: some View {
+        Section {
+            Toggle("Enviar a la PC por red local", isOn: $engine.streamToPC)
+            if engine.streamToPC {
+                Text(link.state.text).font(.footnote).foregroundStyle(.secondary)
+                TextField("Dirección manual (ej. 192.168.137.1:8765)", text: $link.manualAddress)
+                    .keyboardType(.numbersAndPunctuation)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Reconectar") { link.reconnect() }
+            }
+        } header: {
+            Text("Procesar en la PC")
+        } footer: {
+            Text("Abre el programa Levantamiento 3D en tu PC. Funciona con el mismo Wi-Fi, con el hotspot del iPhone (también por cable USB) o con la zona con cobertura inalámbrica de Windows; no necesita internet. Si la app no encuentra la PC sola, escribe la dirección que muestra el programa.")
         }
     }
 }
