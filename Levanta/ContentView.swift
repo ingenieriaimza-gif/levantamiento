@@ -147,9 +147,14 @@ struct ContentView: View {
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text("vóxel \(Int((engine.voxelSizeCm * 10).rounded())) mm")
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text("vóxel \(Int((engine.voxelSizeCm * 10).rounded())) mm")
+                    if engine.recordRGBD {
+                        Text("\(engine.keyframeCount) cuadros RGB-D")
+                    }
+                }
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
             }
 
             HStack(spacing: 18) {
@@ -215,12 +220,25 @@ struct ContentView: View {
     private func save() {
         saving = true
         engine.exportPLY { result in
-            saving = false
+            var message = ""
             switch result {
             case .success(let url):
-                showToast("Guardado: \(url.lastPathComponent)")
+                message = "Nube guardada: \(url.lastPathComponent)"
             case .failure(let error):
                 engine.statusMessage = error.localizedDescription
+            }
+            engine.finishRGBD { rgbd in
+                saving = false
+                switch rgbd {
+                case .success(let parts):
+                    if !parts.isEmpty {
+                        message += message.isEmpty ? "" : " · "
+                        message += parts.count == 1 ? "Paquete RGB-D listo" : "Paquete RGB-D en \(parts.count) partes"
+                    }
+                case .failure(let error):
+                    engine.statusMessage = "RGB-D: \(error.localizedDescription)"
+                }
+                if !message.isEmpty { showToast(message) }
             }
         }
     }
@@ -275,6 +293,7 @@ struct SettingsView: View {
                     }
                     Toggle("Solo puntos de alta confianza", isOn: $engine.highConfidenceOnly)
                     Toggle("Profundidad suavizada", isOn: $engine.smoothDepth)
+                    Toggle("Guardar cuadros RGB-D (máxima calidad)", isOn: $engine.recordRGBD)
                     Stepper("Lecturas mínimas por punto: \(engine.minObservations)",
                             value: $engine.minObservations, in: 1...5)
                         .onChange(of: engine.minObservations) { _, v in

@@ -39,6 +39,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     @Published var highConfidenceOnly = true
     @Published var minObservations: Int = 2
     @Published var smoothDepth = false
+    /// Guardar cuadros RGB-D (foto + profundidad + posición) para la fusión de alta calidad.
+    @Published var recordRGBD = true
+    @Published var keyframeCount = 0
 
     let pointsNode = SCNNode()
     private(set) var sceneView: ARSCNView?
@@ -56,6 +59,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var activeMinConfidence: UInt8 = 2
     private var activeMinObs: UInt16 = 2
     private var activeSmooth = false
+    private let recorder = KeyframeRecorder()
+    private var activeRecordRGBD = true
     private var tracking = false
     private var previewTimer: Timer?
     private var previewBusy = false
@@ -108,8 +113,19 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let conf: UInt8 = highConfidenceOnly ? 2 : 1
         let minObs = UInt16(max(1, minObservations))
         let smooth = smoothDepth
+        let rgbd = recordRGBD
         queue.async {
             self.activeSmooth = smooth
+            self.activeRecordRGBD = rgbd
+            if start && rgbd && !self.recorder.isActive {
+                do {
+                    try self.recorder.begin()
+                } catch {
+                    DispatchQueue.main.async {
+                        self.statusMessage = "No se pudo iniciar la grabación RGB-D: \(error.localizedDescription)"
+                    }
+                }
+            }
             if start && self.sums.isEmpty {
                 self.activeVoxel = voxel
             }
@@ -127,6 +143,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let voxel = Float(voxelSizeCm / 100.0)
         queue.async {
             self.scanning = false
+            self.recorder.discard()
+            DispatchQueue.main.async { self.keyframeCount = 0 }
             self.keyToIndex.removeAll(keepingCapacity: false)
             self.sums.removeAll(keepingCapacity: false)
             self.colorSums.removeAll(keepingCapacity: false)
@@ -153,6 +171,14 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         guard frame.timestamp - lastProcessTime >= processInterval else { return }
         lastProcessTime = frame.timestamp
         integrate(frame)
+        if activeRecordRGBD && recorder.isActive {
+            let chosen = activeSmooth ? (frame.smoothedSceneDepth ?? frame.sceneDepth)
+                                      : (frame.sceneDepth ?? frame.smoothedSceneDepth)
+            if let depth = chosen, recorder.consider(frame: frame, depth: depth) {
+                let n = recorder.count
+                DispatchQueue.main.async { self.keyframeCount = n }
+            }
+        }
     }
 
     func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
@@ -439,6 +465,27 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: Exportar
 
+    /// Cierra la grabación RGB-D actual y la empaqueta en partes .zip listas para compartir.
+    func finishRGBD(completion: @escaping (Result<[URL], Error>) -> Void) {
+        queue.async {
+            guard let dir = self.recorder.finish() else {
+                DispatchQueue.main.async { completion(.success([])) }
+                return
+            }
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let parts = try KeyframeRecorder.packageParts(dir)
+                    DispatchQueue.main.async {
+                        self.keyframeCount = 0
+                        completion(.success(parts))
+                    }
+                } catch {
+                    DispatchQueue.main.async { completion(.failure(error)) }
+                }
+            }
+        }
+    }
+
     /// Guarda la nube como PLY binario (x, y, z en metros + color) en Documentos/Escaneos.
     func exportPLY(completion: @escaping (Result<URL, Error>) -> Void) {
         queue.async {
@@ -526,7 +573,7 @@ enum ScanStore {
         guard let dir = try? folder(),
               let items = try? FileManager.default.contentsOfDirectory(
                 at: dir, includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return [] }
-        return items.filter { $0.pathExtension.lowercased() == "ply" }.sorted { a, b in
+        return items.filter { ["ply", "zip"].contains($0.pathExtension.lowercased()) }.sorted { a, b in
             let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             return da > db
