@@ -8,6 +8,9 @@ y exporta:
   nube_fusionada.ply   igual, en PLY binario
   malla_color.ply      malla con color por vértice, metros, Z arriba
   malla_solidworks.stl malla en milímetros, Z arriba (reducida para SolidWorks)
+  modelo_texturizado.glb  malla con las fotos (aspecto fotográfico), metros, Y arriba
+  modelo_texturizado.usdz igual, para abrir directo en el iPhone (Vista rápida y AR)
+  obj/                 la misma malla en OBJ + MTL + JPG, metros, Z arriba
   reporte.txt          resumen y parámetros
 
 Uso:
@@ -28,6 +31,8 @@ import zipfile
 import cv2
 import numpy as np
 import open3d as o3d
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # módulos propios (texturizar)
 
 # ARKit (x der, y arriba, z atrás)  ->  OpenCV/Open3D (x der, y abajo, z adelante)
 ARKIT_TO_CV = np.diag([1.0, -1.0, -1.0, 1.0])
@@ -248,6 +253,9 @@ def main():
     ap.add_argument("--escala", nargs=2, type=float, metavar=("REAL", "NUBE"),
                     help="calibración: distancia real y la misma distancia medida en la nube (m)")
     ap.add_argument("--max-triangulos-stl", type=int, default=1_500_000)
+    ap.add_argument("--sin-textura", action="store_true", help="no generar el modelo con fotos")
+    ap.add_argument("--triangulos-textura", type=int, default=700_000)
+    ap.add_argument("--pagina-textura", type=int, default=4096, help="tamaño de cada página de textura")
     args = ap.parse_args()
 
     trunc = args.trunc or 5 * args.voxel
@@ -264,14 +272,22 @@ def main():
         log(f"Fusionados {used} cuadros ({dropped} descartados por borrosos)")
 
         mesh, pcd = extract(vbg, args.lecturas)
-        mesh = clean_mesh(mesh, min_triangles=400)
-        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=16, std_ratio=2.5)
-
         scale = 1.0
         if args.escala:
             real, measured = args.escala
             scale = real / measured
             log(f"Calibración de escala: ×{scale:.5f}")
+        mesh = clean_mesh(mesh, min_triangles=400)
+        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=16, std_ratio=2.5)
+
+
+        tex_info = None
+        if not args.sin_textura:
+            from texturizar import texture_mesh
+            tex_info = texture_mesh(mesh, frames, args.salida, dmax=args.dmax,
+                                    target_triangles=args.triangulos_textura,
+                                    page_size=args.pagina_textura,
+                                    to_z_up=Y_UP_TO_Z_UP, scale=scale)
 
         # A Z arriba + escala
         M = Y_UP_TO_Z_UP.copy()
@@ -308,6 +324,10 @@ def main():
             f"Extensión (X × Y × Z): {hi[0] - lo[0]:.3f} × {hi[1] - lo[1]:.3f} × {hi[2] - lo[2]:.3f} m",
             "Sistema: metros, Z hacia arriba (STL en milímetros). Origen: donde arrancó el escaneo.",
         ]
+        if tex_info:
+            rep.append(f"Modelo con fotos: {tex_info['triangles']:,} triángulos, {tex_info['photos_used']} fotos, "
+                       f"{tex_info['pages']} página(s) de textura, {tex_info['coverage'] * 100:.1f} % cubierto "
+                       "(modelo_texturizado.glb/.usdz, Y arriba; obj/ con Z arriba)")
         with open(out("reporte.txt"), "w") as f:
             f.write("\n".join(rep) + "\n")
         log("\n".join(rep))

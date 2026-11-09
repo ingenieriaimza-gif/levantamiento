@@ -21,7 +21,7 @@ import open3d as o3d
 FULL_W, FULL_H = 1920, 1440
 FX, FY, CX, CY = 1452.3, 1452.3, 959.6, 719.2      # intrínsecos típicos de cámara ancha
 DEPTH_W, DEPTH_H = 256, 192
-IMG_W, IMG_H = 512, 384                            # foto guardada (la app usa 1440×1080)
+IMG_W, IMG_H = 960, 720                            # foto guardada (la app usa 1440×1080)
 
 
 def cyl(radius, length, axis, center, color):
@@ -136,8 +136,13 @@ def main():
         nrm = hit["primitive_normals"].numpy()
         shade = 0.55 + 0.45 * np.abs(nrm @ np.array([0.3, 0.9, 0.3]) / np.linalg.norm([0.3, 0.9, 0.3]))
         col = col * shade[:, None]
-        # textura ligera para que la foto tenga detalle
-        tex = 0.9 + 0.1 * np.sin(np.arange(IMG_W * IMG_H) * 0.37)
+        # detalle fino ligado a la superficie: cuadrícula de 2 cm y líneas de 5 mm cada 10 cm
+        th = hit["t_hit"].numpy()
+        pw = rays[:, :3] + rays[:, 3:] * np.where(np.isfinite(th), th, 0)[:, None]
+        chk = (np.floor(pw[:, 0] / 0.02) + np.floor(pw[:, 1] / 0.02) + np.floor(pw[:, 2] / 0.02)) % 2
+        lines_ = (np.abs(((pw + 0.05) % 0.10) - 0.05) < 0.0025).any(1)
+        tex = 0.82 + 0.18 * chk
+        tex = np.where(lines_, 0.35, tex)
         img = (np.clip(col * tex[:, None], 0, 1) * 255).astype(np.uint8).reshape(IMG_H, IMG_W, 3)
         cv2.imwrite(os.path.join(args.salida, "frames", f"{i:06d}.jpg"),
                     cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])

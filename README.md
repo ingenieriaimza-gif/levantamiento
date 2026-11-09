@@ -12,6 +12,13 @@ con color, en metros reales, y guardarlas como PLY.
   y exporta nube E57 para ReCap/Navisworks, malla con color en PLY y malla STL en mm para SolidWorks.
 - Corrección del centro óptico al cambiar de resolución (evitaba un desplazamiento de ~2 mm a 1 m).
 
+### Modelo con aspecto fotográfico
+
+Además de la nube y la malla, el procesamiento pega las fotos de los cuadros RGB-D sobre la malla
+(`tools/texturizar.py`): cada triángulo toma la foto que lo ve más de frente, de cerca, nítida y sin
+obstrucciones. Sale en `modelo_texturizado.usdz` (se abre directo en el iPhone, con giro y realidad
+aumentada), `modelo_texturizado.glb` (web, Blender) y `obj/` (OBJ + texturas, Z arriba).
+
 ### Exactitud medida en un espacio simulado (skid con tubería, ruido realista de LiDAR)
 
 | | Nube en vivo | Fusión RGB-D |
