@@ -1,0 +1,10 @@
+open3d==0.20.0
+numpy>=1.26
+opencv-python>=4.9
+aiohttp>=3.9
+zeroconf>=0.130
+pye57>=0.4
+trimesh>=4.0
+usd-core>=24.0
+scipy>=1.11
+pillow>=10.0
