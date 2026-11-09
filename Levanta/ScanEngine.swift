@@ -252,8 +252,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let sy = Float(dh) / Float(imgH)
         let fx = K[0][0] * sx
         let fy = K[1][1] * sy
-        let cx = K[2][0] * sx
-        let cy = K[2][1] * sy
+        // Centro óptico escalado respecto al centro del píxel (convención de píxel centrado)
+        let cx = (K[2][0] + 0.5) * sx - 0.5
+        let cy = (K[2][1] + 0.5) * sy - 0.5
         let T = frame.camera.transform
 
         let inv = 1.0 / activeVoxel

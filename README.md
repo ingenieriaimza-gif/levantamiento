@@ -3,7 +3,31 @@
 App propia que usa directamente el sensor LiDAR del iPhone (ARKit) para crear nubes de puntos
 con color, en metros reales, y guardarlas como PLY.
 
-## Qué hace la versión 0.3
+## Qué hace la versión 0.4
+
+- **Cuadros RGB-D:** mientras escaneas, la app guarda cuadros clave (foto, profundidad, confianza y
+  posición exacta del iPhone) cada ~7 cm de avance o 6° de giro. Al pulsar Guardar se empaquetan en
+  uno o varios `.zip` de hasta 24 MB (en *Mis escaneos*) para compartirlos.
+- **Fusión de alta calidad** (`tools/procesar_rgbd.py`): combina todas las vistas en un volumen TSDF
+  y exporta nube E57 para ReCap/Navisworks, malla con color en PLY y malla STL en mm para SolidWorks.
+- Corrección del centro óptico al cambiar de resolución (evitaba un desplazamiento de ~2 mm a 1 m).
+
+### Exactitud medida en un espacio simulado (skid con tubería, ruido realista de LiDAR)
+
+| | Nube en vivo | Fusión RGB-D |
+|---|---|---|
+| Error mediano a la superficie real | 3.6 mm | 1.1 mm |
+| 95 % de los puntos | 12.3 mm | 5.8 mm |
+| Diámetro tubo 2" (50.8 mm) | −5.1 mm | +0.3 mm |
+| Diámetro tubo 3" (76.2 mm) | +5.6 mm | +1.4 mm |
+
+Prueba reproducible: `python3 tools/sintetico.py --salida sim/paquete` y luego
+`python3 tools/procesar_rgbd.py sim/paquete --salida sim/salida`.
+En un escaneo real el error dependerá además de la deriva del seguimiento y de los reflejos.
+
+## Versiones anteriores
+
+### 0.3
 
 - Más detalle: lee todos los píxeles del LiDAR, ~11 cuadros por segundo, vóxeles de 2, 3 y 5 mm, y profundidad sin suavizar por defecto.
 - Icono propio y nombre "Levantamiento 3D".

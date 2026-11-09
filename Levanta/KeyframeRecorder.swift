@@ -171,7 +171,7 @@ final class KeyframeRecorder {
             "i": count,
             "t": frame.timestamp,
             "fx": K[0][0] * s, "fy": K[1][1] * s,
-            "cx": K[2][0] * s, "cy": K[2][1] * s,
+            "cx": (K[2][0] + 0.5) * s - 0.5, "cy": (K[2][1] + 0.5) * s - 0.5,
             "w": savedW, "h": savedH,
             "T": cols
         ]
