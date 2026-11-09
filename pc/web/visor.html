@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Levantamiento 3D — PC</title>
+<style>
+  :root {
+    --bg: #0e1115; --panel: rgba(22, 26, 32, 0.86); --line: #2a313b;
+    --fg: #e8ecf1; --muted: #8b95a3; --accent: #f5a524; --ok: #3fcf6e; --bad: #f0584a;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    --sans: "Segoe UI", system-ui, sans-serif;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--sans); }
+  #view { position: fixed; inset: 0; }
+  .panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+           backdrop-filter: blur(8px); padding: 14px 16px; }
+  #top { top: 16px; left: 16px; right: 16px; display: flex; gap: 22px; align-items: center; flex-wrap: wrap; }
+  #top h1 { margin: 0; font-size: 16px; letter-spacing: .02em; }
+  .stat { display: flex; flex-direction: column; }
+  .stat b { font: 600 20px/1.1 var(--mono); font-variant-numeric: tabular-nums; }
+  .stat span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+  #dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); display: inline-block; margin-right: 6px; }
+  #dot.on { background: var(--ok); }
+  #log { bottom: 16px; left: 16px; width: min(560px, calc(100% - 64px)); max-height: 30vh; overflow: auto;
+         font: 12px/1.5 var(--mono); color: var(--muted); }
+  #log div:last-child { color: var(--fg); }
+  #ips { bottom: 16px; right: 16px; text-align: right; }
+  #ips b { font: 600 18px var(--mono); color: var(--accent); display: block; }
+  #ips span { color: var(--muted); font-size: 12px; }
+  .btns { margin-left: auto; display: flex; gap: 8px; }
+  button { background: #1d232b; color: var(--fg); border: 1px solid var(--line); border-radius: 8px;
+           padding: 7px 12px; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="top" class="panel">
+  <h1><span id="dot"></span>Levantamiento 3D</h1>
+  <div class="stat"><b id="frames">0</b><span>cuadros</span></div>
+  <div class="stat"><b id="kf">0</b><span>fotos clave</span></div>
+  <div class="stat"><b id="tris">0</b><span>triángulos en vivo</span></div>
+  <div class="btns">
+    <button id="fit" type="button">Encuadrar</button>
+    <button id="top-view" type="button">Planta</button>
+  </div>
+</div>
+<div id="log" class="panel"></div>
+<div id="ips" class="panel"><span>Dirección para la app</span><b id="addr">…</b><span id="addr2"></span></div>
+
+<script type="module">
+import * as THREE from './web/three.module.min.js';
+import { OrbitControls } from './web/OrbitControls.js';
+
+const view = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0e1115);
+view.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, innerWidth / innerHeight, 0.01, 200);
+camera.position.set(2.5, 2, 2.5);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x404040, 1.1));
+const grid = new THREE.GridHelper(10, 20, 0x2a313b, 0x1b2027);
+scene.add(grid);
+let mesh = null, firstMesh = true;
+
+function fit() {
+  if (!mesh) return;
+  mesh.geometry.computeBoundingSphere();
+  const s = mesh.geometry.boundingSphere;
+  controls.target.copy(s.center);
+  camera.position.copy(s.center).add(new THREE.Vector3(1, 0.8, 1).normalize().multiplyScalar(s.radius * 2.2));
+  grid.position.y = mesh.geometry.boundingBox ? mesh.geometry.boundingBox.min.y : 0;
+}
+document.getElementById('fit').onclick = fit;
+document.getElementById('top-view').onclick = () => {
+  if (!mesh) return;
+  const s = mesh.geometry.boundingSphere;
+  controls.target.copy(s.center);
+  camera.position.set(s.center.x, s.center.y + s.radius * 2.5, s.center.z + 0.001);
+};
+
+function log(t) {
+  const el = document.getElementById('log');
+  const d = document.createElement('div');
+  d.textContent = t;
+  el.appendChild(d);
+  while (el.children.length > 80) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+function onMesh(h, buf, off) {
+  const nv = h.nv, nt = h.nt;
+  const pos = new Float32Array(buf.slice(off, off + nv * 12)); off += nv * 12;
+  const col = new Uint8Array(buf.slice(off, off + nv * 3)); off += nv * 3;
+  const idx = new Uint32Array(buf.slice(off, off + nt * 12));
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3, true));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  g.computeVertexNormals();
+  g.computeBoundingBox();
+  if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
+  mesh = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+  scene.add(mesh);
+  document.getElementById('tris').textContent = nt.toLocaleString('es-MX');
+  if (firstMesh) { fit(); firstMesh = false; }
+}
+
+let lastMsg = '';
+function onStatus(s) {
+  document.getElementById('frames').textContent = s.cuadros.toLocaleString('es-MX');
+  document.getElementById('kf').textContent = s.clave.toLocaleString('es-MX');
+  if (s.mensaje && s.mensaje !== lastMsg) { log(s.mensaje); lastMsg = s.mensaje; }
+}
+
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/visor`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => document.getElementById('dot').classList.add('on');
+  ws.onclose = () => { document.getElementById('dot').classList.remove('on'); setTimeout(connect, 2000); };
+  ws.onmessage = (ev) => {
+    const dv = new DataView(ev.data);
+    const kind = dv.getUint8(0), hl = dv.getUint32(1, true);
+    const h = JSON.parse(new TextDecoder().decode(new Uint8Array(ev.data, 5, hl)));
+    if (kind === 10) onMesh(h, ev.data, 5 + hl);
+    else if (kind === 11) onStatus(h);
+  };
+}
+connect();
+
+fetch('/estado').then(r => r.json()).then(s => {
+  const ips = s.ips || [];
+  document.getElementById('addr').textContent = ips.length ? `${ips[0]}:${s.puerto}` : 'sin red';
+  document.getElementById('addr2').textContent = ips.slice(1).map(ip => `${ip}:${s.puerto}`).join('  ·  ');
+}).catch(() => {});
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+(function loop() { controls.update(); renderer.render(scene, camera); requestAnimationFrame(loop); })();
+</script>
+</body>
+</html>

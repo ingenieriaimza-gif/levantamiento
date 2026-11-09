@@ -289,7 +289,8 @@ def main():
         tex_info = None
         if not args.sin_textura:
             from texturizar import texture_mesh
-            tex_info = texture_mesh(mesh, frames, args.salida, dmax=args.dmax,
+            kf = [f for f in frames if f.get("kf", True)] or frames     # fotos clave (las más nítidas)
+            tex_info = texture_mesh(mesh, kf, args.salida, dmax=args.dmax,
                                     target_triangles=args.triangulos_textura,
                                     page_size=args.pagina_textura,
                                     texture_scale=args.escala_textura,
