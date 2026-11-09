@@ -48,7 +48,7 @@ struct ContentView: View {
                         .background(.ultraThinMaterial, in: Capsule())
                         .transition(.opacity)
                 }
-                bottomBar
+                BottomArea(measure: engine.measure, scanBar: bottomBar)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -117,6 +117,8 @@ struct ContentView: View {
             .background(.ultraThinMaterial, in: Capsule())
 
             Spacer()
+
+            MeasureToggle(measure: engine.measure)
 
             Button {
                 engine.colorMode = engine.colorMode == .coverage ? .real : .coverage

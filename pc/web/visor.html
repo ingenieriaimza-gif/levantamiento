@@ -63,6 +63,26 @@
   table.req th { color: var(--muted); font-weight: 500; }
   .okc { color: var(--ok); } .badc { color: var(--bad); }
   .note { padding: 10px 12px; border-radius: 8px; background: #1d232b; }
+  #meas { top: 130px; right: 16px; width: 340px; max-height: calc(100vh - 260px); overflow: auto; display: flex; flex-direction: column; gap: 10px; }
+  #meas h3 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+  .m-item { border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .m-item.cal { border-color: var(--accent); }
+  .m-top { display: flex; align-items: baseline; gap: 8px; }
+  .m-top b { font: 600 18px var(--mono); font-variant-numeric: tabular-nums; }
+  .m-src { font-size: 11px; color: var(--muted); }
+  .m-src.iphone { color: #5ab0ff; }
+  .m-sub { font: 12px var(--mono); color: var(--muted); }
+  .m-row { display: flex; gap: 6px; align-items: center; font-size: 12px; flex-wrap: wrap; }
+  .m-row input[type=number] { width: 90px; background: #0f1318; color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font: 12px var(--mono); }
+  .m-err { font: 600 12px var(--mono); }
+  button.mini { padding: 3px 8px; font-size: 12px; }
+  #labels { position: fixed; inset: 0; pointer-events: none; z-index: 2; }
+  .mlabel { position: absolute; transform: translate(-50%, -120%); background: rgba(14,17,21,.88); border: 1px solid var(--accent);
+            color: var(--fg); font: 600 12px var(--mono); padding: 2px 6px; border-radius: 6px; white-space: nowrap; }
+  .mlabel.iphone { border-color: #5ab0ff; }
+  #viewing { top: 66px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; align-items: center; padding: 8px 12px; }
+  button.btn.on { border-color: var(--accent); color: var(--accent); }
+  #hint { bottom: 16px; left: 50%; transform: translateX(-50%); padding: 8px 14px; color: var(--accent); }
 </style>
 </head>
 <body>
@@ -84,9 +104,24 @@
     <div class="stat"><b id="tris">0</b><span>triángulos en vivo</span></div>
   </div>
   <div id="viewbtns" class="panel">
+    <button class="btn" id="measure-btn" type="button">Medir</button>
     <button class="btn" id="fit" type="button">Encuadrar</button>
     <button class="btn" id="top-view" type="button">Planta</button>
   </div>
+  <div id="viewing" class="panel" hidden><span id="viewing-name"></span>
+    <button class="btn mini" id="back-live" type="button">Volver a en vivo</button></div>
+  <div id="meas" class="panel">
+    <h3>Medidas</h3>
+    <div id="meas-empty" class="muted">Pulsa <b>Medir</b> y haz clic en dos puntos del modelo. Las medidas hechas en el iPhone aparecen aquí también.</div>
+    <div id="meas-scale" class="m-sub" hidden></div>
+    <div id="meas-list" style="display:flex;flex-direction:column;gap:8px"></div>
+    <div class="row" id="meas-actions" hidden>
+      <button class="btn mini" id="meas-clear" type="button">Borrar las mías</button>
+      <button class="btn mini" id="meas-reproc" type="button" hidden>Procesar con esta escala</button>
+    </div>
+  </div>
+  <div id="hint" class="panel" hidden></div>
+  <div id="labels"></div>
   <div id="log" class="panel"></div>
   <div id="ips" class="panel"><span>Dirección para la app del iPhone</span><b id="addr">…</b><span id="addr2"></span></div>
 </section>
@@ -142,6 +177,7 @@
 <script type="module">
 import * as THREE from './web/three.module.min.js';
 import { OrbitControls } from './web/OrbitControls.js';
+import { GLTFLoader } from './web/GLTFLoader.js';
 
 const $ = (id) => document.getElementById(id);
 const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Levanta': '1' },
@@ -172,20 +208,28 @@ scene.add(new THREE.HemisphereLight(0xffffff, 0x404040, 1.1));
 const grid = new THREE.GridHelper(10, 20, 0x2a313b, 0x1b2027);
 scene.add(grid);
 let mesh = null, firstMesh = true;
+let model = null;            // escaneo procesado abierto (GLB)
+let viewing = 'vivo';        // 'vivo' o la carpeta del escaneo abierto
+const target = () => (viewing === 'vivo' ? mesh : model);
 
+function bounds() {
+  const t = target();
+  if (!t) return null;
+  const box = new THREE.Box3().setFromObject(t);
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  return { box, sphere };
+}
 function fit() {
-  if (!mesh) return;
-  const s = mesh.geometry.boundingSphere;
-  controls.target.copy(s.center);
-  camera.position.copy(s.center).add(new THREE.Vector3(1, 0.8, 1).normalize().multiplyScalar(s.radius * 2.2));
-  grid.position.y = mesh.geometry.boundingBox.min.y;
+  const b = bounds(); if (!b) return;
+  controls.target.copy(b.sphere.center);
+  camera.position.copy(b.sphere.center).add(new THREE.Vector3(1, 0.8, 1).normalize().multiplyScalar(b.sphere.radius * 2.2));
+  grid.position.y = b.box.min.y;
 }
 $('fit').onclick = fit;
 $('top-view').onclick = () => {
-  if (!mesh) return;
-  const s = mesh.geometry.boundingSphere;
-  controls.target.copy(s.center);
-  camera.position.set(s.center.x, s.center.y + s.radius * 2.5, s.center.z + 0.001);
+  const b = bounds(); if (!b) return;
+  controls.target.copy(b.sphere.center);
+  camera.position.set(b.sphere.center.x, b.sphere.center.y + b.sphere.radius * 2.5, b.sphere.center.z + 0.001);
 };
 
 function log(t) {
@@ -207,9 +251,10 @@ function onMesh(h, buf, off) {
   g.computeVertexNormals(); g.computeBoundingBox(); g.computeBoundingSphere();
   if (mesh) { scene.remove(mesh); mesh.geometry.dispose(); }
   mesh = new THREE.Mesh(g, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+  mesh.visible = viewing === 'vivo';
   scene.add(mesh);
   $('tris').textContent = nt.toLocaleString('es-MX');
-  if (firstMesh) { fit(); firstMesh = false; }
+  if (firstMesh && viewing === 'vivo') { fit(); firstMesh = false; }
 }
 
 let lastMsg = '';
@@ -230,6 +275,7 @@ function connect() {
     const h = JSON.parse(new TextDecoder().decode(new Uint8Array(ev.data, 5, hl)));
     if (kind === 10) onMesh(h, ev.data, 5 + hl);
     else if (kind === 11) onStatus(h);
+    else if (kind === 12) onPhoneMeasures(h.medidas || []);
   };
 }
 connect();
@@ -244,7 +290,181 @@ addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
 });
-(function loop() { controls.update(); renderer.render(scene, camera); requestAnimationFrame(loop); })();
+(function loop() { controls.update(); renderer.render(scene, camera); updateLabels(); requestAnimationFrame(loop); })();
+
+// ---------- medición
+let measures = [];           // {id, nombre, a:[x,y,z], b:[x,y,z], origen, real, calibra}
+let measuring = false, pending = null;
+const mGroup = new THREE.Group(); scene.add(mGroup);
+const ray = new THREE.Raycaster();
+const fmt = (m) => `${(m * 1000).toLocaleString('es-MX', { maximumFractionDigits: 1, minimumFractionDigits: 1 })} mm`;
+const dist3 = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+
+function escala() {
+  const c = measures.find(m => m.calibra && m.real);
+  return c ? (c.real / 1000) / dist3(c.a, c.b) : 1;
+}
+
+function setHint(t) { $('hint').hidden = !t; $('hint').textContent = t || ''; }
+$('measure-btn').onclick = () => {
+  measuring = !measuring; pending = null;
+  $('measure-btn').classList.toggle('on', measuring);
+  setHint(measuring ? 'Clic en el primer punto (Esc para cancelar)' : '');
+  drawMeasures();
+};
+addEventListener('keydown', (e) => { if (e.key === 'Escape' && measuring) { pending = null; setHint('Clic en el primer punto'); drawMeasures(); } });
+
+let downAt = null;
+renderer.domElement.addEventListener('pointerdown', (e) => { downAt = [e.clientX, e.clientY]; });
+renderer.domElement.addEventListener('pointerup', (e) => {
+  if (!measuring || !downAt || Math.hypot(e.clientX - downAt[0], e.clientY - downAt[1]) > 5) return;
+  const t = target(); if (!t) return;
+  ray.setFromCamera(new THREE.Vector2(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
+  const hit = ray.intersectObject(t, true)[0];
+  if (!hit) return;
+  const p = hit.point.toArray();
+  if (!pending) { pending = p; setHint('Clic en el segundo punto'); }
+  else {
+    const n = measures.filter(m => m.origen !== 'iphone').length + 1;
+    measures.push({ id: 'pc' + Date.now(), nombre: `M${n}`, a: pending, b: p, origen: 'pc', real: null, calibra: false });
+    pending = null; setHint('Clic en el primer punto de la siguiente medida');
+    changed();
+  }
+  drawMeasures();
+});
+
+function onPhoneMeasures(list) {
+  measures = measures.filter(m => m.origen !== 'iphone').concat(list.map((m, i) => ({
+    id: m.id || ('ip' + i), nombre: m.nombre || `iPhone ${i + 1}`, a: m.a, b: m.b, origen: 'iphone',
+    real: m.real ?? null, calibra: false })));
+  renderList(); drawMeasures();
+}
+
+const labelEls = new Map();
+function drawMeasures() {
+  mGroup.clear();
+  const s = bounds();
+  const r = s ? Math.max(0.004, s.sphere.radius * 0.004) : 0.006;
+  const dot = (p, color) => {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(r, 16, 12), new THREE.MeshBasicMaterial({ color, depthTest: false }));
+    m.position.fromArray(p); m.renderOrder = 10; mGroup.add(m);
+  };
+  for (const m of measures) {
+    const color = m.origen === 'iphone' ? 0x5ab0ff : 0xf5a524;
+    const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...m.a), new THREE.Vector3(...m.b)]);
+    const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color, depthTest: false }));
+    line.renderOrder = 10; mGroup.add(line);
+    dot(m.a, color); dot(m.b, color);
+  }
+  if (pending) dot(pending, 0xffffff);
+  // etiquetas
+  const keep = new Set();
+  for (const m of measures) {
+    keep.add(m.id);
+    let el = labelEls.get(m.id);
+    if (!el) { el = document.createElement('div'); el.className = 'mlabel'; $('labels').append(el); labelEls.set(m.id, el); }
+    el.classList.toggle('iphone', m.origen === 'iphone');
+    el.textContent = `${m.nombre} · ${fmt(dist3(m.a, m.b) * escala())}`;
+  }
+  for (const [id, el] of labelEls) if (!keep.has(id)) { el.remove(); labelEls.delete(id); }
+}
+const tmpV = new THREE.Vector3();
+function updateLabels() {
+  const visible = !$('tab-visor').hidden;
+  for (const m of measures) {
+    const el = labelEls.get(m.id); if (!el) continue;
+    tmpV.set((m.a[0] + m.b[0]) / 2, (m.a[1] + m.b[1]) / 2, (m.a[2] + m.b[2]) / 2).project(camera);
+    const on = visible && tmpV.z < 1;
+    el.style.display = on ? '' : 'none';
+    if (on) { el.style.left = `${(tmpV.x + 1) / 2 * innerWidth}px`; el.style.top = `${(1 - tmpV.y) / 2 * innerHeight}px`; }
+  }
+}
+
+function renderList() {
+  const list = $('meas-list'); list.replaceChildren();
+  const k = escala();
+  $('meas-empty').hidden = measures.length > 0;
+  $('meas-actions').hidden = measures.length === 0;
+  $('meas-scale').hidden = k === 1;
+  $('meas-scale').textContent = `Escala calibrada: ×${k.toFixed(5)} (${((k - 1) * 1000).toFixed(1)} mm por metro)`;
+  $('meas-reproc').hidden = !(k !== 1 && viewing !== 'vivo');
+  for (const m of measures) {
+    const d = dist3(m.a, m.b) * k;
+    const dh = Math.hypot(m.a[0] - m.b[0], m.a[2] - m.b[2]) * k, dv = Math.abs(m.a[1] - m.b[1]) * k;
+    const item = el('div', { className: 'm-item' + (m.calibra ? ' cal' : '') });
+    item.append(el('div', { className: 'm-top' }, el('span', { textContent: m.nombre }), el('b', { textContent: fmt(d) }),
+      el('span', { className: 'm-src ' + m.origen, textContent: m.origen === 'iphone' ? 'iPhone' : 'PC' })));
+    item.append(el('div', { className: 'm-sub', textContent: `horizontal ${fmt(dh)} · vertical ${fmt(dv)}` }));
+    const real = el('input', { type: 'number', step: '0.1', min: '0', placeholder: 'real mm', value: m.real ?? '' });
+    real.setAttribute('aria-label', `Medida real de ${m.nombre} en milímetros`);
+    real.onchange = () => { m.real = real.value === '' ? null : parseFloat(real.value); if (!m.real) m.calibra = false; changed(); };
+    const cal = el('label', {}, el('input', { type: 'radio', name: 'calibra', checked: m.calibra }), ' calibrar');
+    cal.querySelector('input').onchange = () => {
+      if (!m.real) { real.focus(); return; }
+      measures.forEach(x => x.calibra = x === m); changed();
+    };
+    const row = el('div', { className: 'm-row' }, 'Real:', real, cal);
+    if (m.real && !m.calibra) {
+      const err = d * 1000 - m.real;
+      row.append(el('span', { className: 'm-err ' + (Math.abs(err) <= 5 ? 'okc' : 'badc'), textContent: `error ${err >= 0 ? '+' : ''}${err.toFixed(1)} mm` }));
+    }
+    if (m.origen !== 'iphone') {
+      const del = el('button', { className: 'btn mini', type: 'button', textContent: 'Borrar' });
+      del.onclick = () => { measures = measures.filter(x => x !== m); changed(); };
+      row.append(del);
+    }
+    item.append(row);
+    list.append(item);
+  }
+}
+
+let saveTimer = null;
+function changed() {
+  renderList(); drawMeasures();
+  if (viewing === 'vivo') return;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => post('/api/medidas/' + encodeURIComponent(viewing),
+    { escala: escala(), medidas: measures }).catch(() => {}), 600);
+}
+$('meas-clear').onclick = () => { measures = measures.filter(m => m.origen === 'iphone'); changed(); };
+$('meas-reproc').onclick = async () => {
+  const k = escala();
+  const r = await post('/api/reprocesar', { carpeta: viewing, escala: k });
+  if (r.ok) {
+    // el modelo nuevo quedará escalado: llevar las medidas a esa escala
+    for (const m of measures) { m.a = m.a.map(v => v * k); m.b = m.b.map(v => v * k); }
+    changed();
+    log('Procesando con la escala calibrada…');
+    show('visor');
+  } else log(r.mensaje);
+};
+
+// ---------- abrir un escaneo procesado
+const loader = new GLTFLoader();
+async function openScan(carpeta, nombre) {
+  show('visor');
+  setHint('Cargando el modelo…');
+  loader.load('/api/modelo/' + encodeURIComponent(carpeta), async (gltf) => {
+    if (model) scene.remove(model);
+    model = gltf.scene;
+    model.traverse(o => { if (o.isMesh) { o.material.side = THREE.DoubleSide; } });
+    scene.add(model);
+    viewing = carpeta;
+    if (mesh) mesh.visible = false;
+    $('viewing').hidden = false; $('viewing-name').textContent = `Escaneo ${nombre}`;
+    const d = await fetch('/api/medidas/' + encodeURIComponent(carpeta)).then(r => r.json()).catch(() => ({ medidas: [] }));
+    measures = d.medidas || [];
+    renderList(); drawMeasures(); fit(); setHint(measuring ? 'Clic en el primer punto' : '');
+  }, undefined, () => setHint('No se pudo abrir el modelo de este escaneo.'));
+}
+$('back-live').onclick = () => {
+  if (model) { scene.remove(model); model = null; }
+  viewing = 'vivo'; $('viewing').hidden = true;
+  if (mesh) mesh.visible = true;
+  measures = measures.filter(m => m.origen === 'iphone');
+  renderList(); drawMeasures(); fit();
+};
+renderList();
 
 // ---------- escaneos
 function el(tag, props = {}, ...kids) {
@@ -279,6 +499,11 @@ async function loadScans() {
         files.append(b);
       }
       const actions = el('div', { className: 'row' });
+      if (s.archivos.some(f => f.nombre === 'modelo_texturizado.glb')) {
+        const v3 = el('button', { className: 'btn primary', type: 'button', textContent: 'Ver en 3D y medir' });
+        v3.onclick = () => openScan(s.carpeta, s.nombre);
+        actions.append(v3);
+      }
       const open = el('button', { className: 'btn', type: 'button', textContent: 'Abrir carpeta' });
       open.onclick = () => post('/api/abrir', { ruta: s.carpeta });
       actions.append(open);

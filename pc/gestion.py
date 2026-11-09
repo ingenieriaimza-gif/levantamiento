@@ -236,7 +236,12 @@ class Gestion:
         d = self._safe(data.get("carpeta", ""))
         if self.server.status.get("procesando"):
             return web.json_response({"ok": False, "mensaje": "Ya hay un procesamiento en curso"})
-        asyncio.create_task(self.server.final_processing(d))
+        escala = data.get("escala")
+        try:
+            escala = float(escala) if escala else None
+        except (TypeError, ValueError):
+            escala = None
+        asyncio.create_task(self.server.final_processing(d, escala=escala))
         return web.json_response({"ok": True})
 
     # ---------------------------------------------------------- actualizaciones
@@ -366,6 +371,49 @@ class Gestion:
 
     async def salir(self, request):
         asyncio.get_running_loop().call_later(0.5, os._exit, 0)
+        return web.json_response({"ok": True})
+
+    # ---------------------------------------------------------- modelo y medidas de un escaneo
+
+    async def modelo(self, request):
+        d = self._safe(request.match_info["carpeta"])
+        p = os.path.join(d, "resultado", "modelo_texturizado.glb")
+        if not os.path.exists(p):
+            raise web.HTTPNotFound(text="Este escaneo no tiene modelo procesado")
+        return web.FileResponse(p)
+
+    async def medidas_get(self, request):
+        d = self._safe(request.match_info["carpeta"])
+        out = {"escala": 1.0, "medidas": []}
+        for fn in ("medidas.json", "medidas_iphone.json"):
+            try:
+                with open(os.path.join(d, fn), encoding="utf-8") as f:
+                    data = json.load(f)
+                if fn == "medidas.json":
+                    out.update(data)
+                else:
+                    known = {m.get("id") for m in out["medidas"]}
+                    out["medidas"] += [m for m in data.get("medidas", []) if m.get("id") not in known]
+            except (OSError, ValueError):
+                pass
+        return web.json_response(out)
+
+    async def medidas_set(self, request):
+        d = self._safe(request.match_info["carpeta"])
+        data = await request.json()
+        clean = {"escala": float(data.get("escala", 1.0)), "medidas": []}
+        for m in data.get("medidas", [])[:500]:
+            try:
+                clean["medidas"].append({
+                    "id": str(m["id"])[:40], "nombre": str(m.get("nombre", ""))[:60],
+                    "a": [float(x) for x in m["a"]][:3], "b": [float(x) for x in m["b"]][:3],
+                    "origen": str(m.get("origen", "pc"))[:10],
+                    "real": float(m["real"]) if m.get("real") not in (None, "") else None,
+                    "calibra": bool(m.get("calibra", False))})
+            except (KeyError, TypeError, ValueError):
+                continue
+        with open(os.path.join(d, "medidas.json"), "w", encoding="utf-8") as f:
+            json.dump(clean, f, indent=1)
         return web.json_response({"ok": True})
 
     # ---------------------------------------------------------- actualizar desde un archivo
@@ -590,6 +638,9 @@ class Gestion:
         app.router.add_post("/api/archivo/instalar", self.archivo_instalar)
         app.router.add_get("/api/ultima", self.ultima)
         app.router.add_post("/api/instalar_iphone", self.instalar_iphone)
+        app.router.add_get("/api/modelo/{carpeta}", self.modelo)
+        app.router.add_get("/api/medidas/{carpeta}", self.medidas_get)
+        app.router.add_post("/api/medidas/{carpeta}", self.medidas_set)
         app.router.add_get("/app/info.json", self.app_info)          # visible para el iPhone en la red local
         app.router.add_get("/app/Levanta.ipa", self.app_ipa)
         self.publish_app_status()

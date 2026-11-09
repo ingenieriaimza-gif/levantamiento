@@ -14,6 +14,8 @@ Protocolo (WebSocket binario en /ws):
                  2 inicio  {nombre, dispositivo, sistema}
                  3 fin     {}  (procesar en alta calidad)
                  4 descartar {}  (el usuario borró el escaneo en el iPhone)
+                 5 medidas {medidas:[{id,a[3],b[3],nombre}]}  (medidas hechas en el iPhone, mundo ARKit)
+  PC -> visores: 12 medidas {medidas, origen}
   PC -> iPhone:  10 malla  {nv,nt} + float32 xyz*nv + uint8 rgb*nv + uint32 índices*nt*3
                  11 estado {cuadros, clave, mensaje, procesando}
 """
@@ -46,8 +48,8 @@ import open3d as o3d  # noqa: E402
 from aiohttp import WSMsgType, web  # noqa: E402
 
 ARKIT_TO_CV = np.diag([1.0, -1.0, -1.0, 1.0])
-MSG_FRAME, MSG_START, MSG_END, MSG_DISCARD = 1, 2, 3, 4
-MSG_MESH, MSG_STATUS = 10, 11
+MSG_FRAME, MSG_START, MSG_END, MSG_DISCARD, MSG_MEASURES = 1, 2, 3, 4, 5
+MSG_MESH, MSG_STATUS, MSG_MEASURES_OUT = 10, 11, 12
 
 
 def pack(kind, header, payload=b""):
@@ -186,6 +188,7 @@ class Server:
         self.phone = None
         self.viewers = set()
         self.last_mesh = None
+        self.phone_measures = []
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)   # fusión: un hilo
         self.status = {"cuadros": 0, "clave": 0, "mensaje": "Esperando al iPhone", "procesando": False,
                        "resultados": []}
@@ -237,6 +240,13 @@ class Server:
                     await loop.run_in_executor(self.pool, self.session.add_frame, h, jpeg, depth, conf)
                     self.status["cuadros"] = self.session.frames
                     self.status["clave"] = self.session.keyframes
+                elif kind == MSG_MEASURES:
+                    meds = [dict(m, origen="iphone") for m in h.get("medidas", [])][:500]
+                    self.phone_measures = meds
+                    if self.session is not None:
+                        with open(os.path.join(self.session.dir, "medidas_iphone.json"), "w", encoding="utf-8") as f:
+                            json.dump({"medidas": meds}, f)
+                    await self.broadcast(pack(MSG_MEASURES_OUT, {"medidas": meds, "origen": "iphone"}), phone=False)
                 elif kind == MSG_DISCARD and self.session is not None:
                     sess = self.session
                     self.session = None
@@ -267,6 +277,8 @@ class Server:
         await ws.send_bytes(pack(MSG_STATUS, self.status))
         if self.last_mesh:
             await ws.send_bytes(self.last_mesh)
+        if self.phone_measures:
+            await ws.send_bytes(pack(MSG_MEASURES_OUT, {"medidas": self.phone_measures, "origen": "iphone"}))
         async for _ in ws:
             pass
         self.viewers.discard(ws)
@@ -289,7 +301,7 @@ class Server:
                 await self.broadcast(data)
                 await self.broadcast(pack(MSG_STATUS, self.status))
 
-    async def final_processing(self, sdir):
+    async def final_processing(self, sdir, escala=None):
         self.status["procesando"] = True
         out = os.path.join(sdir, "resultado")
         py = PYTHON
@@ -297,7 +309,7 @@ class Server:
         cmds = [
             [py, "-I", "-X", "utf8", os.path.join(TOOLS, "procesar_rgbd.py"), sdir, "--salida", out,
              "--voxel", "0.004", "--dmax", "3.5", "--conf", "2", "--lecturas", "2",
-             "--triangulos-textura", "1500000"],
+             "--triangulos-textura", "1500000"] + (["--escala", str(escala), "1"] if escala else []),
             [py, "-I", "-X", "utf8", os.path.join(TOOLS, "exportar_splat.py"), sdir,
              "--salida", os.path.join(sdir, "splat"), "--nube", os.path.join(out, "nube_fusionada.ply")],
         ]

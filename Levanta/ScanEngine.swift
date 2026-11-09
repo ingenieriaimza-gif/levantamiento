@@ -56,6 +56,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     let link = PCLink()
     let liveMeshNode = SCNNode()
+    let measure = MeasureController()
 
     let pointsNode = SCNNode()
     private(set) var sceneView: ARSCNView?
@@ -106,10 +107,12 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         view.scene.rootNode.addChildNode(liveMeshNode)
         link.onMesh = { [weak self] data in self?.receiveLiveMesh(data) }
         link.onConnected = { [weak self] in
-            guard let self, self.isScanning else { return }
-            let name = self.currentSessionName()
-            self.link.sendStart(name: name)
+            guard let self else { return }
+            if self.isScanning { self.link.sendStart(name: self.currentSessionName()) }
+            if !self.measure.measures.isEmpty { self.sendMeasures(self.measure.measures) }
         }
+        measure.attach(view)
+        measure.onChange = { [weak self] list in self?.sendMeasures(list) }
         view.session.delegate = self
         view.session.delegateQueue = queue
         sceneView = view
@@ -280,6 +283,15 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             sessionName = f.string(from: Date())
         }
         return sessionName
+    }
+
+    /// Envía las medidas hechas en el iPhone a la PC (mismas coordenadas que el modelo).
+    func sendMeasures(_ list: [MeasureController.Measure]) {
+        guard link.isConnected else { return }
+        let items: [[String: Any]] = list.map { m in
+            ["id": m.id, "nombre": m.name, "a": [m.a.x, m.a.y, m.a.z], "b": [m.b.x, m.b.y, m.b.z]]
+        }
+        if let d = FrameCodec.pack(kind: 5, header: ["medidas": items]) { link.send(d, important: true) }
     }
 
     /// Termina el escaneo y le pide a la PC que procese todo en alta calidad.
