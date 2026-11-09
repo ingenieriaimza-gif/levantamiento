@@ -256,6 +256,8 @@ def main():
     ap.add_argument("--sin-textura", action="store_true", help="no generar el modelo con fotos")
     ap.add_argument("--triangulos-textura", type=int, default=700_000)
     ap.add_argument("--pagina-textura", type=int, default=4096, help="tamaño de cada página de textura")
+    ap.add_argument("--escala-textura", type=float, default=1.0,
+                    help="reduce las fotos en la textura (p. ej. 0.5 para un modelo ligero para el iPhone)")
     args = ap.parse_args()
 
     trunc = args.trunc or 5 * args.voxel
@@ -272,6 +274,9 @@ def main():
         log(f"Fusionados {used} cuadros ({dropped} descartados por borrosos)")
 
         mesh, pcd = extract(vbg, args.lecturas)
+        del vbg                                   # liberar el volumen antes de texturizar
+        import gc
+        gc.collect()
         scale = 1.0
         if args.escala:
             real, measured = args.escala
@@ -287,6 +292,7 @@ def main():
             tex_info = texture_mesh(mesh, frames, args.salida, dmax=args.dmax,
                                     target_triangles=args.triangulos_textura,
                                     page_size=args.pagina_textura,
+                                    texture_scale=args.escala_textura,
                                     to_z_up=Y_UP_TO_Z_UP, scale=scale)
 
         # A Z arriba + escala
@@ -300,13 +306,18 @@ def main():
         cols = (np.clip(np.asarray(pcd.colors), 0, 1) * 255).round().astype(np.uint8)
 
         out = lambda n: os.path.join(args.salida, n)
+        log("Exportando nube (PLY, E57)…")
         o3d.io.write_point_cloud(out("nube_fusionada.ply"), pcd, write_ascii=False)
         write_e57(out("nube_fusionada.e57"), pts, cols)
+        log("Exportando malla (PLY, STL)…")
         o3d.io.write_triangle_mesh(out("malla_color.ply"), mesh, write_ascii=False)
+        gc.collect()
 
         stl = o3d.geometry.TriangleMesh(mesh)
         if len(stl.triangles) > args.max_triangulos_stl:
-            stl = stl.simplify_quadric_decimation(args.max_triangulos_stl)
+            # agrupamiento por vóxel: mucha menos memoria que la decimación cuadrática
+            ratio = math.sqrt(len(stl.triangles) / args.max_triangulos_stl)
+            stl = stl.simplify_vertex_clustering(voxel_size=args.voxel * ratio)
         stl.scale(1000.0, center=(0, 0, 0))     # metros -> milímetros
         stl.compute_triangle_normals()
         stl.vertex_colors = o3d.utility.Vector3dVector()

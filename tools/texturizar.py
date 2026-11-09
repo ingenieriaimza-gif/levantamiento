@@ -54,7 +54,8 @@ def _shelf_pack(sizes, page):
 
 
 def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
-                 page_size=4096, zbuf_scale=2, smooth_iters=6, to_z_up=None, scale=1.0):
+                 page_size=4096, zbuf_scale=2, smooth_iters=6, to_z_up=None, scale=1.0,
+                 harmonize=True, texture_scale=1.0):
     """
     mesh: TriangleMesh de Open3D en el mundo de ARKit (Y arriba, metros).
     frames: lista de cuadros (dicts con jpg, fx, fy, cx, cy, w, h, T) como en procesar_rgbd.
@@ -90,7 +91,8 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         g = cv2.imread(fr["jpg"], cv2.IMREAD_GRAYSCALE)
         sharp.append(cv2.Laplacian(cv2.resize(g, (g.shape[1] // 2, g.shape[0] // 2)), cv2.CV_64F).var() if g is not None else 0)
     sharp = np.array(sharp)
-    sharp_w = np.clip(sharp / (np.median(sharp) + 1e-9), 0.3, 1.5)
+    # la nitidez pesa fuerte: una foto movida casi nunca gana si hay otra nítida
+    sharp_w = np.clip((sharp / (np.median(sharp) + 1e-9)) ** 1.5, 0.1, 2.5)
 
     for k, fr in enumerate(frames):
         w, h = int(fr["w"]), int(fr["h"])
@@ -136,9 +138,10 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         qu = np.clip(np.nan_to_num((uv_u + 0.5) / zbuf_scale - 0.5).round().astype(int), 0, zw - 1)
         qv = np.clip(np.nan_to_num((uv_v + 0.5) / zbuf_scale - 0.5).round().astype(int), 0, zh - 1)
         vz = zbuf[qv, qu]
-        vvis = np.abs(vz - zvv) < np.maximum(0.01, 0.008 * np.abs(zvv))
-        inside = (inside & vvis).reshape(-1, 3).all(1)
+        vvis = (np.abs(vz - zvv) < np.maximum(0.012, 0.01 * np.abs(zvv))).reshape(-1, 3).all(1)
+        inside = inside.reshape(-1, 3).all(1)
         idx = idx[inside]
+        vvis = vvis[inside]
         if len(idx) == 0:
             continue
         view = C[idx] - t
@@ -147,6 +150,8 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         # de frente, cerca, y lejos del borde de la foto (menos distorsión)
         edge = np.minimum.reduce([u[idx], w - u[idx], v[idx], h - v[idx]]) / (0.5 * min(w, h))
         score = (cosang ** 2) / (dist ** 1.5) * sharp_w[k] * np.clip(edge, 0.25, 1.0)
+        # si algún vértice queda tapado, la foto sólo sirve como último recurso
+        score = np.where(vvis, score, score * 0.02)
         better = score > best_score[idx]
         # el mejor anterior pasa a segundo
         ii = idx[better]
@@ -184,6 +189,11 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         if changed == 0:
             break
 
+    # --- igualación de exposición/balance entre fotos
+    gains = np.ones((K, 3))
+    if harmonize:
+        gains = _harmonize_gains(frames, C, labels, second_frame, K)
+
     # --- UV en la foto elegida y recorte por foto
     used = np.unique(labels[labels >= 0])
     corner_uv = np.zeros((nF, 3, 2))
@@ -204,7 +214,9 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         crops[k] = (lo, hi)
 
     # parche gris para triángulos sin foto
-    sizes = [(int(crops[k][1][0] - crops[k][0][0] + 1), int(crops[k][1][1] - crops[k][0][1] + 1)) for k in used]
+    ts = float(texture_scale)
+    sizes = [(max(1, int(round((crops[k][1][0] - crops[k][0][0] + 1) * ts))),
+              max(1, int(round((crops[k][1][1] - crops[k][0][1] + 1) * ts)))) for k in used]
     sizes.append((8, 8))
     place, n_pages = _shelf_pack(sizes, page_size)
     pages = [np.full((page_size, page_size, 3), 128, np.uint8) for _ in range(n_pages)]
@@ -214,11 +226,15 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         (lo, hi), (pg, px, py) = crops[k], place[j]
         img = cv2.imread(frames[k]["jpg"], cv2.IMREAD_COLOR)
         crop = img[lo[1]:hi[1] + 1, lo[0]:hi[0] + 1]
+        if harmonize:
+            crop = np.clip(crop.astype(np.float32) * gains[k][::-1], 0, 255).astype(np.uint8)
+        if ts != 1.0:
+            crop = cv2.resize(crop, sizes[j], interpolation=cv2.INTER_AREA)
         pages[pg][py:py + crop.shape[0], px:px + crop.shape[1]] = crop
         sel = labels == k
         # coordenada de píxel (centro) -> UV de la página
-        cu = corner_uv[sel][..., 0] - lo[0] + px + 0.5
-        cv_ = corner_uv[sel][..., 1] - lo[1] + py + 0.5
+        cu = (corner_uv[sel][..., 0] - lo[0] + 0.5) * ts + px
+        cv_ = (corner_uv[sel][..., 1] - lo[1] + 0.5) * ts + py
         face_uv[sel] = np.stack([cu / page_size, 1.0 - cv_ / page_size], -1)
         page_of[sel] = pg
     gpg, gx, gy = place[-1]
@@ -234,6 +250,65 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     _log(f"  {len(used)} fotos usadas, {n_pages} página(s) de textura {page_size}², {time.time() - t0:.0f} s")
     return {"triangles": nF, "photos_used": int(len(used)), "pages": n_pages,
             "coverage": float((labels >= 0).mean())}
+
+
+def _project(fr, P):
+    Tc = np.array(fr["T"], float).reshape(4, 4).T @ ARKIT_TO_CV
+    Pc = (P - Tc[:3, 3]) @ Tc[:3, :3]
+    z = np.maximum(Pc[:, 2], 1e-6)
+    return fr["fx"] * Pc[:, 0] / z + fr["cx"], fr["fy"] * Pc[:, 1] / z + fr["cy"]
+
+
+def _harmonize_gains(frames, C, labels, second, K, max_pairs=400_000):
+    """Ganancia RGB por foto para que una misma superficie tenga el mismo color en todas.
+    Usa pares (mejor foto, segunda mejor) del mismo triángulo y resuelve mínimos cuadrados en log."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.linalg import lsqr
+
+    pairs = np.nonzero((labels >= 0) & (second >= 0) & (second != labels))[0]
+    if len(pairs) < 1000:
+        return np.ones((K, 3))
+    rng = np.random.default_rng(0)
+    if len(pairs) > max_pairs:
+        pairs = rng.choice(pairs, max_pairs, replace=False)
+    colA = np.zeros((len(pairs), 3))
+    colB = np.zeros((len(pairs), 3))
+    la, lb = labels[pairs], second[pairs]
+    for k in range(K):
+        ia = np.nonzero(la == k)[0]
+        ib = np.nonzero(lb == k)[0]
+        if len(ia) == 0 and len(ib) == 0:
+            continue
+        img = cv2.imread(frames[k]["jpg"], cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        img = cv2.blur(img, (9, 9)).astype(np.float64)[..., ::-1]
+        h, w = img.shape[:2]
+        for sel, out in ((ia, colA), (ib, colB)):
+            if len(sel) == 0:
+                continue
+            u, v = _project(frames[k], C[pairs[sel]])
+            u = np.clip(np.round(u).astype(int), 0, w - 1)
+            v = np.clip(np.round(v).astype(int), 0, h - 1)
+            out[sel] = img[v, u]
+    ok = ((colA > 12) & (colA < 245) & (colB > 12) & (colB < 245)).all(1)
+    la, lb, colA, colB = la[ok], lb[ok], colA[ok], colB[ok]
+    n = len(la)
+    if n < 1000:
+        return np.ones((K, 3))
+    lam = 0.05 * math.sqrt(n / K)
+    rows = np.r_[np.arange(n), np.arange(n), n + np.arange(K)]
+    cols = np.r_[la, lb, np.arange(K)]
+    vals = np.r_[np.ones(n), -np.ones(n), np.full(K, lam)]
+    A = coo_matrix((vals, (rows, cols)), shape=(n + K, K)).tocsr()
+    gains = np.ones((K, 3))
+    for ch in range(3):
+        b = np.r_[np.log(colB[:, ch]) - np.log(colA[:, ch]), np.zeros(K)]
+        g = lsqr(A, b, atol=1e-8, btol=1e-8, iter_lim=2000)[0]
+        gains[:, ch] = np.exp(np.clip(g, -0.5, 0.5))
+    _log(f"  igualación de color: {n:,} pares, ganancia p5–p95 "
+         f"{np.percentile(gains, 5):.2f}–{np.percentile(gains, 95):.2f}")
+    return gains
 
 
 def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
