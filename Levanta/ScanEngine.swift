@@ -59,6 +59,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     @Published var sharpCapture = true
     /// Te estás moviendo o girando demasiado rápido para fotos nítidas.
     @Published var tooFast = false
+    /// El iPhone está quieto: ya se tomaron las lecturas de esta vista y no se agregan más puntos.
+    @Published var holdingStill = false
     /// Enviar el escaneo a la PC por red local.
     @Published var streamToPC = false {
         didSet { link.setEnabled(streamToPC) }
@@ -100,6 +102,16 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var speedEMA: Float = 0
     private var turnEMA: Float = 0
     private var tooFastState = false
+    // pausa cuando no te mueves (solo en `queue`)
+    private var anchorPose: simd_float4x4?
+    private var stillReadings = 0
+    private var stillState = false
+    /// Lecturas que se toman de una misma vista antes de pausar (las suficientes para confirmar
+    /// cada punto: "lecturas por punto" es 2 por omisión).
+    private let readingsPerView = 4
+    /// Movimiento mínimo para que cuente como vista nueva.
+    private let newViewMove: Float = 0.02          // 2 cm
+    private let newViewTurn: Float = 3 * .pi / 180  // 3°
     private var lastStreamTime: TimeInterval = 0
     private var streamIndex = 0
     private var sessionName = ""        // solo en el hilo principal
@@ -206,6 +218,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         liveMeshNode.geometry = nil
         liveMeshTriangles = 0
         tooFast = false
+        holdingStill = false
+        queue.async { self.anchorPose = nil; self.stillReadings = 0; self.stillState = false }
         CameraTuning.apply(sharp: false)
         sessionName = ""
         pointsNode.isHidden = false
@@ -250,8 +264,10 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             mask = FrameCodec.personMask(frame, w: CVPixelBufferGetWidth(dm), h: CVPixelBufferGetHeight(dm))
         }
         updatePersonIndicator(mask != nil)
-        integrate(frame, mask: mask)
         updateMotion(frame)
+        // si no te mueves, la misma vista ya está leída: no se agregan más puntos ni se manda a la PC
+        guard isNewView(frame.camera.transform) else { return }
+        integrate(frame, mask: mask)
         var savedKeyframe = false
         if activeRecordRGBD && recorder.isActive, let depth = chosen,
            recorder.consider(frame: frame, depth: depth, mask: mask) {
@@ -264,6 +280,31 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             lastStreamTime = frame.timestamp
             streamFrame(frame, depth: depth, keyframe: savedKeyframe, mask: mask)
         }
+    }
+
+    /// true mientras haya que tomar lecturas: al moverse 2 cm o girar 3° desde la última vista,
+    /// o en las primeras lecturas de una vista nueva.
+    private func isNewView(_ T: simd_float4x4) -> Bool {
+        var moved = true
+        if let A = anchorPose {
+            let dp = simd_distance(SIMD3<Float>(T.columns.3.x, T.columns.3.y, T.columns.3.z),
+                                   SIMD3<Float>(A.columns.3.x, A.columns.3.y, A.columns.3.z))
+            var ang = (simd_quatf(A).inverse * simd_quatf(T)).angle
+            if ang > .pi { ang = 2 * .pi - ang }
+            moved = dp > newViewMove || ang > newViewTurn
+        }
+        if moved {
+            anchorPose = T
+            stillReadings = 1
+        } else {
+            stillReadings += 1
+        }
+        let still = stillReadings > readingsPerView
+        if still != stillState {
+            stillState = still
+            DispatchQueue.main.async { self.holdingStill = still }
+        }
+        return !still
     }
 
     /// Indicador "persona ignorada" con un poco de histéresis para que no parpadee.

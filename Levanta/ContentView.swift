@@ -34,6 +34,13 @@ struct ContentView: View {
                         .foregroundStyle(.black)
                         .transition(.opacity)
                 }
+                if engine.isScanning && engine.holdingStill && !engine.tooFast {
+                    Label("Sin movimiento: en pausa hasta que te muevas", systemImage: "pause.circle.fill")
+                        .font(.footnote.weight(.semibold))
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .transition(.opacity)
+                }
                 if engine.isScanning && engine.tooFast {
                     Label("Más despacio para fotos nítidas", systemImage: "tortoise.fill")
                         .font(.subheadline.weight(.bold))
