@@ -739,10 +739,6 @@ async function loadScans() {
           grupo('Vista foto-realista',
             fileRow('Archivo HTML', 'doble clic: se abre en Edge o Chrome, se mueve y se mide; sirve para compartir', s.html.nombre));
         }
-        grupo('Unreal Engine',
-          fileRow('Nube de puntos con color (TXT)', 'plugin LiDAR Point Cloud: arrástrala al Content Browser; metros, funciona también en UE 5.6', 'unreal/nube_unreal.txt', 'nube_unreal.txt'),
-          fileRow('Modelo con fotos (FBX)', 'Import con texturas; mismo lugar que la nube', 'obj/modelo_navisworks.fbx', 'modelo_navisworks.fbx'),
-          fileRow('Vista foto-realista (PLY)', 'con un plugin de Gaussian Splatting para Unreal (XV3DGS, YaGS…)', 'vista_foto.ply'));
         grupo('Navisworks (interferencias)',
           fileRow('Modelo con fotos (FBX)', 'con colores y texturas; sirve en Clash Detective; en milímetros. Déjalo junto a sus imágenes textura_*.jpg', 'obj/modelo_navisworks.fbx', 'modelo_navisworks.fbx'),
           fileRow('Malla sin color (STL)', 'más ligera; en milímetros', 'malla_solidworks.stl'));

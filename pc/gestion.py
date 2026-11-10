@@ -347,7 +347,6 @@ class Gestion:
                 if os.path.isdir(res):
                     for fn in ("modelo_texturizado.usdz", "nube_fusionada.e57", "malla_solidworks.stl",
                                "obj/modelo_texturizado.obj", "obj/modelo_navisworks.fbx", "modelo_solidworks.3mf",
-                               "unreal/nube_unreal.txt", "vista_foto.ply",
                                "modelo_texturizado.glb", "reporte.txt"):
                         p = os.path.join(res, fn)
                         if os.path.exists(p):

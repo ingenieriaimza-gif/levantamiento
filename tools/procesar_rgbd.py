@@ -310,22 +310,6 @@ def solo_lo_nuevo(completa, exacta, cerca=0.010, min_triangles=60):
 
 # ---------------------------------------------------------------- exportación
 
-def write_unreal_txt(path, pts, cols):
-    """Nube para el plugin LiDAR Point Cloud de Unreal Engine: texto "X Y Z R G B" en metros.
-    (En UE 5.6 el plugin dejó de leer E57/LAS; el texto funciona en todas las versiones.)
-    Unreal usa ejes de mano izquierda: se invierte Y para que coincida con el FBX importado
-    (el importador de FBX de Unreal hace esa misma conversión)."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    p = pts.astype(np.float64).copy()
-    p[:, 1] = -p[:, 1]
-    with open(path, "w", encoding="ascii", newline="\n") as f:
-        for i in range(0, len(p), 500_000):
-            a, c = p[i:i + 500_000], cols[i:i + 500_000].astype(int)
-            f.write("\n".join(f"{x:.4f} {y:.4f} {z:.4f} {r} {g} {b}"
-                               for (x, y, z), (r, g, b) in zip(a.tolist(), c.tolist())))
-            f.write("\n")
-
-
 def write_e57(path, pts, cols):
     import pye57
     e = pye57.E57(path, mode="w")
@@ -461,8 +445,6 @@ def main():
         log("Exportando nube (PLY, E57)…")
         o3d.io.write_point_cloud(out("nube_fusionada.ply"), pcd, write_ascii=False)
         write_e57(out("nube_fusionada.e57"), pts, cols)
-        avance("exportar", 0.3, "Guardando la nube para Unreal Engine")
-        write_unreal_txt(out(os.path.join("unreal", "nube_unreal.txt")), pts, cols)
         avance("exportar", 0.7, "Guardando la malla para Navisworks y SolidWorks")
         log("Exportando malla (PLY, STL)…")
         o3d.io.write_triangle_mesh(out("malla_color.ply"), mesh, write_ascii=False)
@@ -497,7 +479,6 @@ def main():
             "Para medir e interferencias exactas: malla_solidworks.stl (solo lecturas de alta confianza).",
             "Con colores y texturas: Navisworks -> obj/modelo_navisworks.fbx (junto a sus textura_*.jpg);",
             "SolidWorks 2021+ -> modelo_solidworks.3mf (textura dentro del archivo).",
-            "Unreal Engine -> unreal/nube_unreal.txt (plugin LiDAR Point Cloud, metros) y obj/modelo_navisworks.fbx.",
             "El modelo con fotos usa esa misma malla exacta y además rellena zonas de confianza media",
             "(piso, objetos oscuros, lo lejano); en esas zonas rellenadas la medida puede variar unos mm.",
         ]
