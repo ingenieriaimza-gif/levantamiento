@@ -19,13 +19,17 @@ struct ContentView: View {
 
             reticle
 
+            if engine.isScanning && engine.needRelocalize {
+                RelocalizeCard(onContinue: { engine.resumeHere() })
+            }
+
             VStack(spacing: 12) {
                 topBar
                 if engine.streamToPC {
                     PCStatusPill(link: engine.link, triangles: engine.liveMeshTriangles)
                     AppUpdateBanner(link: engine.link)
                 }
-                if engine.colorMode == .coverage && (engine.isScanning || engine.pointCount > 0) {
+                if !engine.meshView && engine.colorMode == .coverage && (engine.isScanning || engine.pointCount > 0) {
                     QualityLegend()
                 }
                 FocusBar(focus: engine.focus,
@@ -142,6 +146,18 @@ struct ContentView: View {
 
             Spacer()
 
+            if LiveMeshView.supported {
+                Button {
+                    engine.meshView.toggle()
+                } label: {
+                    Image(systemName: engine.meshView ? "cube.transparent.fill" : "circle.grid.3x3.fill")
+                        .frame(width: 40, height: 40)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .accessibilityLabel(engine.meshView ? "Ver puntos con calidad" : "Ver malla")
+            }
+
+            if !engine.meshView {
             Button {
                 engine.colorMode = engine.colorMode == .coverage ? .real : .coverage
             } label: {
@@ -159,6 +175,7 @@ struct ContentView: View {
                     .background(.ultraThinMaterial, in: Circle())
             }
             .accessibilityLabel(engine.showCloud ? "Ocultar nube" : "Mostrar nube")
+            }
 
             Button {
                 showSettings = true
@@ -633,6 +650,41 @@ struct AppUpdateBanner: View {
                 }
                 .presentationDetents([.medium])
             }
+        }
+    }
+}
+
+/// Se perdió la ubicación: como en las apps de escaneo profesionales, se pausa hasta volver a una zona
+/// ya escaneada (así no se duplican superficies corridas).
+struct RelocalizeCard: View {
+    let onContinue: () -> Void
+    @State private var showEscape = false
+
+    var body: some View {
+        VStack(spacing: 14) {
+            Image(systemName: "iphone.gen3.radiowaves.left.and.right")
+                .font(.system(size: 40, weight: .semibold))
+            Text("Regresa al área anterior para reanudar")
+                .font(.headline)
+                .multilineTextAlignment(.center)
+            Text("El iPhone perdió su ubicación. Apunta despacio a algo que ya escaneaste; seguirá solo cuando coincida.")
+                .font(.footnote)
+                .multilineTextAlignment(.center)
+                .opacity(0.85)
+            if showEscape {
+                Button("Seguir desde aquí", action: onContinue)
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 18).padding(.vertical, 10)
+                    .background(.white.opacity(0.18), in: Capsule())
+            }
+        }
+        .foregroundStyle(.white)
+        .padding(22)
+        .frame(maxWidth: 320)
+        .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 22))
+        .onAppear {
+            showEscape = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { showEscape = true }
         }
     }
 }

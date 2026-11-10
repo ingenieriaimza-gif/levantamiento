@@ -15,6 +15,17 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     @Published var statusMessage: String?
     @Published var lidarAvailable = true
     @Published var showCloud = true
+    /// Vista de malla (alambre blanco + azul en lo que falta) en lugar de la nube de puntos.
+    @Published var meshView: Bool = (UserDefaults.standard.object(forKey: "vistaMalla") as? Bool) ?? LiveMeshView.supported {
+        didSet {
+            UserDefaults.standard.set(meshView, forKey: "vistaMalla")
+            liveMesh.enabled = meshView
+            pointsNode.isHidden = meshView
+        }
+    }
+    let liveMesh = LiveMeshView()
+    /// Se perdió la ubicación del iPhone: hay que volver a una zona ya escaneada para seguir.
+    @Published var needRelocalize = false
     @Published var colorMode: ColorMode = .coverage {
         didSet { tintLiveMesh = colorMode == .coverage }
     }
@@ -160,6 +171,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     private let maxVoxels = 7_000_000
     private var phoneFullWarned = false
+    private var lostWhileScanning = false
+    private var meshViewActive = false
+    private var relocCheck = 0
     /// Lo ya escaneado lejos de ti se guarda resumido (un punto cada 2 cm) para que la vista nunca se llene.
     private let archiveVoxel: Float = 0.02
     private var archiveKey: [Int64: Int32] = [:]
@@ -183,6 +197,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         liveMeshNode.renderingOrder = -1
         view.scene.rootNode.addChildNode(liveMeshNode)
         view.scene.rootNode.addChildNode(focus.root)
+        liveMesh.attach(to: view)
+        liveMesh.enabled = meshView
+        pointsNode.isHidden = meshView
         view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tappedCamera(_:))))
         focus.onChange = { [weak self] zones in self?.zonesChanged(zones) }
         coach.onGuide = { [weak self] g, prog in
@@ -228,6 +245,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             } else {
                 peopleRemovalAvailable = false
             }
+        }
+        if LiveMeshView.supported {
+            config.sceneReconstruction = .mesh      // malla en vivo del iPhone (solo para ver)
         }
         config.worldAlignment = .gravity
         let options: ARSession.RunOptions = reset ? [.resetTracking, .removeExistingAnchors] : []
@@ -320,7 +340,10 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         queue.async { self.anchorPose = nil; self.stillReadings = 0; self.stillState = false }
         CameraTuning.apply(sharp: false)
         sessionName = ""
-        pointsNode.isHidden = false
+        pointsNode.isHidden = meshView
+        liveMesh.clear()
+        needRelocalize = false
+        queue.async { self.lostWhileScanning = false }
         queue.async {
             self.streamIndex = 0
             self.lastMotionPose = nil
@@ -359,6 +382,52 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
+    /// Seguir escaneando aunque no se haya regresado a la zona anterior (empieza a partir de aquí).
+    func resumeHere() {
+        needRelocalize = false
+        queue.async { self.lostWhileScanning = false }
+    }
+
+    /// ¿Lo que ve el LiDAR ahora coincide con puntos ya escaneados? (en `queue`)
+    private func matchesScanned(_ frame: ARFrame) -> Bool {
+        guard let depthData = frame.sceneDepth ?? frame.smoothedSceneDepth,
+              let confMap = depthData.confidenceMap else { return false }
+        let dm = depthData.depthMap
+        CVPixelBufferLockBaseAddress(dm, .readOnly); CVPixelBufferLockBaseAddress(confMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(dm, .readOnly); CVPixelBufferUnlockBaseAddress(confMap, .readOnly) }
+        guard let dBase = CVPixelBufferGetBaseAddress(dm), let cBase = CVPixelBufferGetBaseAddress(confMap) else { return false }
+        let dw = CVPixelBufferGetWidth(dm), dh = CVPixelBufferGetHeight(dm)
+        let dRow = CVPixelBufferGetBytesPerRow(dm), cRow = CVPixelBufferGetBytesPerRow(confMap)
+        let K = frame.camera.intrinsics
+        let img = frame.camera.imageResolution
+        let sx = Float(dw) / Float(img.width), sy = Float(dh) / Float(img.height)
+        let fx = K[0][0] * sx, fy = K[1][1] * sy
+        let cx = (K[2][0] + 0.5) * sx - 0.5, cy = (K[2][1] + 0.5) * sy - 0.5
+        let T = frame.camera.transform
+        let inv = 1 / activeVoxel
+        let half: Int64 = 1 << 20
+        var samples = 0, hits = 0
+        for v in stride(from: 3, to: dh, by: 6) {
+            let dp = dBase.advanced(by: v * dRow).assumingMemoryBound(to: Float32.self)
+            let cp = cBase.advanced(by: v * cRow).assumingMemoryBound(to: UInt8.self)
+            for u in stride(from: 3, to: dw, by: 6) {
+                let d = dp[u]
+                guard cp[u] >= 2, d.isFinite, d > 0.3, d < 3.0 else { continue }
+                let pw = T * SIMD4<Float>((Float(u) - cx) * d / fx, -(Float(v) - cy) * d / fy, -d, 1)
+                let bx = Int64((pw.x * inv).rounded(.down)), by = Int64((pw.y * inv).rounded(.down))
+                let bz = Int64((pw.z * inv).rounded(.down))
+                samples += 1
+                var found = false
+                outer: for dx in -1...1 { for dy in -1...1 { for dz in -1...1 {
+                    let key = ((bx + Int64(dx) + half) << 42) | ((by + Int64(dy) + half) << 21) | (bz + Int64(dz) + half)
+                    if keyToIndex[key] != nil { found = true; break outer }
+                } } }
+                if found { hits += 1 }
+            }
+        }
+        return samples >= 150 && Float(hits) / Float(samples) >= 0.55
+    }
+
     func updateMinObservations(_ value: Int) {
         let v = UInt16(max(1, value))
         queue.async { self.activeMinObs = v }
@@ -374,6 +443,21 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             DispatchQueue.main.async { self.centerDistance = d }
         }
         guard scanning, tracking else { return }
+        if lostWhileScanning {
+            // después de perder la ubicación solo se sigue si lo que ve el LiDAR coincide con lo ya
+            // escaneado; si no, la posición quedó corrida y se duplicarían superficies
+            relocCheck &+= 1
+            guard relocCheck % 3 == 0 else { return }
+            if matchesScanned(frame) {
+                lostWhileScanning = false
+                DispatchQueue.main.async {
+                    self.needRelocalize = false
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                }
+            } else {
+                return
+            }
+        }
         guard frame.timestamp - lastProcessTime >= processInterval else { return }
         lastProcessTime = frame.timestamp
         let chosen = activeSmooth ? (frame.smoothedSceneDepth ?? frame.sceneDepth)
@@ -555,6 +639,12 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             }
         }
         tracking = ok
+        if !ok && scanning && sums.count > 2000 && !lostWhileScanning {
+            if case .limited(.initializing) = camera.trackingState {} else {
+                lostWhileScanning = true
+                DispatchQueue.main.async { self.needRelocalize = true }
+            }
+        }
         DispatchQueue.main.async {
             self.trackingOK = ok
             self.trackingText = text
@@ -927,11 +1017,12 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         guard !previewBusy else { return }
         previewBusy = true
         let show = showCloud
+        meshViewActive = meshView
         let mode = colorMode
         queue.async {
             let minObs = self.activeMinObs
             let total = self.counts.reduce(0) { $0 + ($1 >= minObs ? 1 : 0) } + self.archivedPoints
-            let geometry = show ? self.buildGeometry(mode: mode, maxPoints: 900_000,
+            let geometry = show && !self.meshViewActive ? self.buildGeometry(mode: mode, maxPoints: 900_000,
                                                      pointSize: 3, maxRadius: 3) : nil
             DispatchQueue.main.async {
                 self.pointCount = total
