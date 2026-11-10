@@ -163,7 +163,7 @@ def ia_instalada():
 
 def ia_config():
     cfg = load_config()
-    return {"final": bool(cfg.get("ia_final", True)), "vivo": bool(cfg.get("ia_vivo", False))}
+    return {"final": bool(cfg.get("ia_final", False)), "vivo": bool(cfg.get("ia_vivo", False))}
 
 
 def local_version():

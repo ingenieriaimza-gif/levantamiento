@@ -7,8 +7,11 @@ Resguardo para que sirva para medir: el LiDAR manda.
   - En cada cuadro la IA se compara completa contra el LiDAR: se ajusta su escala y desfase, y si no
     coincide de forma consistente se descarta ese cuadro (solo LiDAR).
   - Por punto, la IA solo se acepta si coincide con el LiDAR dentro de 1 cm o 1 %.
-  - Donde el LiDAR no tiene dato, la IA se usa solo si está cerca de lecturas válidas del LiDAR
-    (rellena huecos pequeños como bordes, superficies oscuras), no en zonas que el LiDAR nunca vio.
+  - Donde el LiDAR no tiene dato no se inventa nada (rellenar con la IA sin verificar inflaba los tubos).
+
+Resultado en la escena simulada (contra la geometría exacta): menos ruido en superficies planas
+(95 % de los puntos: 6.0 mm con IA vs 7.8 mm sin IA), pero los tubos salen 1–3 mm más gruesos
+(2": +1.2 vs +0.4 mm; 3": +3.3 vs +1.8 mm). Por eso viene apagada por omisión.
 
 Requiere torch y transformers (se instalan aparte desde el programa: "Inteligencia artificial").
 """
@@ -80,7 +83,8 @@ class RefinadorIA:
 
 # parámetros del resguardo (se pueden ajustar para pruebas con variables de entorno)
 TOL_ABS = float(os.environ.get("RGBD_IA_TOL", "0.01"))
-RELLENAR = os.environ.get("RGBD_IA_RELLENO", "1") == "1"
+# rellenar huecos con IA sin verificar empeoró los tubos (+11 mm) en la prueba: apagado
+RELLENAR = os.environ.get("RGBD_IA_RELLENO", "0") == "1"
 MAX_DISP = float(os.environ.get("RGBD_IA_DISP", "0.015"))
 
 

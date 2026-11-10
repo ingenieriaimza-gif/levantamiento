@@ -180,9 +180,11 @@
         <div id="ia-state">Revisando…</div></div></div>
       <div class="muted">Prompt Depth Anything combina la foto con el LiDAR para dar profundidad de mayor resolución.
         El LiDAR sigue mandando: la IA solo se acepta donde coincide con lo medido, y si no coincide se descarta.</div>
+      <div class="muted"><b>Experimental.</b> En la prueba de exactitud quita ruido en superficies planas, pero los tubos
+        salieron 1–3 mm más gruesos que sin IA. Para medir y revisar interferencias déjala apagada.</div>
       <div class="row">
         <button class="btn primary" id="ia-install" type="button" hidden>Instalar IA (descarga de ~3 GB)</button>
-        <label><input type="checkbox" id="ia-final"> Usar IA al procesar los escaneos</label>
+        <label><input type="checkbox" id="ia-final"> Usar IA al procesar los escaneos (experimental)</label>
         <label><input type="checkbox" id="ia-vivo"> Usar IA en la vista en vivo (experimental)</label>
       </div>
     </div>
