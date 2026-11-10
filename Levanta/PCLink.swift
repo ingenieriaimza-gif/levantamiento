@@ -245,6 +245,8 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
         let fecha: String
         let version: Int
         let mb: Double
+        /// La PC ya entrenó la vista foto-realista de este escaneo.
+        let foto: Bool
         var id: String { carpeta }
     }
 
@@ -252,6 +254,13 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     var httpBase: URL? {
         guard isConnected, let u = task?.originalRequest?.url, let host = u.host else { return nil }
         return URL(string: "http://\(host):\(u.port ?? 8765)")
+    }
+
+    /// Página de la PC con la vista foto-realista de un escaneo.
+    func photoViewURL(_ m: PCModel) -> URL? {
+        guard let base = httpBase,
+              let name = m.carpeta.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else { return nil }
+        return URL(string: base.absoluteString + "/web/foto.html?carpeta=" + name)
     }
 
     func fetchModels(_ done: @escaping ([PCModel]) -> Void) {
@@ -264,7 +273,8 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
                     guard let c = m["carpeta"] as? String else { continue }
                     out.append(PCModel(carpeta: c, nombre: m["nombre"] as? String ?? c, fecha: m["fecha"] as? String ?? "",
                                        version: (m["version"] as? NSNumber)?.intValue ?? 0,
-                                       mb: (m["mb"] as? NSNumber)?.doubleValue ?? 0))
+                                       mb: (m["mb"] as? NSNumber)?.doubleValue ?? 0,
+                                       foto: (m["foto"] as? Bool) ?? false))
                 }
             }
             DispatchQueue.main.async { done(out) }

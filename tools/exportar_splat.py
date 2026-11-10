@@ -90,6 +90,8 @@ def main():
     ap.add_argument("--nube", help="nube_fusionada.ply (Z arriba) de procesar_rgbd.py, para los puntos iniciales")
     ap.add_argument("--max-puntos", type=int, default=400_000)
     ap.add_argument("--dmax", type=float, default=3.5)
+    ap.add_argument("--escala", type=float, default=1.0,
+                    help="factor de calibración (el mismo del modelo): la vista queda en las mismas medidas")
     ap.add_argument("--umbral-borrosas", type=float, default=0.35,
                     help="descarta fotos con nitidez menor a esta fracción de la mediana")
     args = ap.parse_args()
@@ -109,6 +111,14 @@ def main():
         os.makedirs(img_dir, exist_ok=True)
         os.makedirs(sp_dir, exist_ok=True)
 
+        esc = float(args.escala)
+
+        def pose(fr):
+            """Cámara -> mundo de ARKit, con la calibración de escala aplicada a la posición."""
+            T = pose_matrix(fr).copy()
+            T[:3, 3] *= esc
+            return T
+
         cams, imgs, ns_frames = [], [], []
         for n, fr in enumerate(frames, start=1):
             name = f"{int(fr['i']):06d}.jpg"
@@ -117,7 +127,7 @@ def main():
             # COLMAP: centro del píxel superior izquierdo en (0.5, 0.5)
             cams.append(f"{n} PINHOLE {w} {h} {fr['fx']:.6f} {fr['fy']:.6f} "
                         f"{fr['cx'] + 0.5:.6f} {fr['cy'] + 0.5:.6f}")
-            c2w_cv = pose_matrix(fr) @ ARKIT_TO_CV
+            c2w_cv = pose(fr) @ ARKIT_TO_CV
             w2c = np.linalg.inv(c2w_cv)
             q = rot_to_quat(w2c[:3, :3])
             t = w2c[:3, 3]
@@ -125,7 +135,7 @@ def main():
                         f"{t[0]:.9f} {t[1]:.9f} {t[2]:.9f} {n} {name}")
             imgs.append("")                       # línea de puntos 2D (vacía)
             # Nerfstudio usa la convención OpenGL (= la de ARKit) para la matriz cámara->mundo
-            ns_frames.append({"file_path": f"images/{name}", "transform_matrix": pose_matrix(fr).tolist(),
+            ns_frames.append({"file_path": f"images/{name}", "transform_matrix": pose(fr).tolist(),
                               "fl_x": fr["fx"], "fl_y": fr["fy"], "cx": fr["cx"] + 0.5, "cy": fr["cy"] + 0.5,
                               "w": w, "h": h})
 
@@ -137,9 +147,10 @@ def main():
         # puntos iniciales
         if args.nube:
             pcd = o3d.io.read_point_cloud(args.nube)
-            pcd.transform(np.linalg.inv(Y_UP_TO_Z_UP))          # de vuelta al mundo de ARKit
+            pcd.transform(np.linalg.inv(Y_UP_TO_Z_UP))          # de vuelta al mundo de ARKit (ya viene calibrada)
         else:
             pcd = lidar_points(meta, frames, args.max_puntos, args.dmax)
+            pcd.scale(esc, center=np.zeros(3))
         P = np.asarray(pcd.points)
         Cc = (np.clip(np.asarray(pcd.colors), 0, 1) * 255).round().astype(int)
         if len(P) > args.max_puntos:

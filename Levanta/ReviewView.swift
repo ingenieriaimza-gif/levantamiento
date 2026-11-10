@@ -1,5 +1,6 @@
 import SwiftUI
 import SceneKit
+import WebKit
 
 /// Revisar 3D: muestra el modelo terminado de la PC (con fotos), o el modelo en vivo de la PC,
 /// o la nube del iPhone si no hay PC. Se gira con un dedo, se acerca con dos, doble toque para
@@ -11,6 +12,7 @@ struct ReviewView: View {
     @StateObject private var finalMeasure = MeasureController()
 
     enum Source: Hashable {
+        case photo(PCLink.PCModel)      // vista foto-realista entrenada en la PC (solo para ver)
         case final(PCLink.PCModel)
         case live
         case cloud
@@ -44,11 +46,14 @@ struct ReviewView: View {
         ZStack {
             Color(white: 0.06).ignoresSafeArea()
 
-            if let content {
+            if case .photo(let m) = source, let url = link.photoViewURL(m) {
+                PhotoWebView(url: url)
+                    .ignoresSafeArea()
+            } else if let content {
                 ReviewSceneView(content: content, center: center, size: size, camera: view,
                                 cameraToken: cameraToken, points: pickPoints, measure: measure)
                     .ignoresSafeArea()
-            } else if loading == nil {
+            } else if loading == nil && !isPhoto {
                 VStack(spacing: 8) {
                     Image(systemName: "cube.transparent").font(.largeTitle)
                     Text("Todavía no hay nada que revisar.")
@@ -73,6 +78,12 @@ struct ReviewView: View {
                     sourceMenu
                     Spacer()
                     Button {
+                        if case .photo(let m) = source {
+                            // se mide sobre el modelo exacto, no sobre la vista foto-realista
+                            measuring = true
+                            select(.final(m))
+                            return
+                        }
                         measuring.toggle()
                         measure.active = measuring
                     } label: {
@@ -83,7 +94,7 @@ struct ReviewView: View {
                                                   : AnyShapeStyle(.ultraThinMaterial), in: Capsule())
                             .foregroundStyle(measuring ? Color.black : Color.white)
                     }
-                    .disabled(content == nil)
+                    .disabled(content == nil && !isPhoto)
                     Button("Cerrar") { dismiss() }
                         .font(.subheadline.weight(.semibold))
                         .padding(.horizontal, 14).padding(.vertical, 8)
@@ -92,16 +103,25 @@ struct ReviewView: View {
 
                 Spacer()
 
-                if measuring {
+                if isPhoto {
+                    Text("Vista foto-realista entrenada en la PC. Gira con un dedo, acerca con dos; doble toque para acercarte a un punto. Para medir toca Medir (cambia al modelo exacto).")
+                        .font(.caption)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
+                        .allowsHitTesting(false)
+                } else if measuring {
                     MeasurePanel(measure: measure, onDone: { measuring = false; measure.active = false })
                 } else if content != nil {
                     infoPanel
                 }
 
-                HStack(spacing: 10) {
-                    cameraButton("Perspectiva", .perspective)
-                    cameraButton("Planta", .top)
-                    cameraButton("Frente", .front)
+                if !isPhoto {
+                    HStack(spacing: 10) {
+                        cameraButton("Perspectiva", .perspective)
+                        cameraButton("Planta", .top)
+                        cameraButton("Frente", .front)
+                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -117,8 +137,14 @@ struct ReviewView: View {
 
     // MARK: Fuente
 
+    private var isPhoto: Bool {
+        if case .photo = source { return true }
+        return false
+    }
+
     private var sourceTitle: String {
         switch source {
+        case .photo(let m): return "Foto-realista · \(m.nombre)"
         case .final(let m): return "Modelo final · \(m.nombre)"
         case .live: return "En vivo (PC)"
         case .cloud: return "Nube del iPhone"
@@ -128,8 +154,15 @@ struct ReviewView: View {
 
     private var sourceMenu: some View {
         Menu {
+            if models.contains(where: { $0.foto }) {
+                Section("Vista foto-realista (PC)") {
+                    ForEach(models.filter { $0.foto }) { m in
+                        Button("\(m.nombre) · \(m.fecha)") { select(.photo(m)) }
+                    }
+                }
+            }
             if !models.isEmpty {
-                Section("Modelos terminados en la PC") {
+                Section("Modelos para medir (PC)") {
                     ForEach(models) { m in
                         Button("\(m.nombre) · \(m.fecha)") { select(.final(m)) }
                     }
@@ -161,7 +194,7 @@ struct ReviewView: View {
     private func chooseDefault() {
         let liveTime = engine.lastLiveMeshTime?.timeIntervalSince1970 ?? 0
         if let m = models.first, Double(m.version) >= liveTime - 5 {
-            select(.final(m))
+            select(m.foto ? .photo(m) : .final(m))
         } else if engine.lastLiveMesh != nil {
             select(.live)
         } else if let m = models.first {
@@ -180,6 +213,10 @@ struct ReviewView: View {
         loadID += 1
         let id = loadID
         switch s {
+        case .photo:
+            measuring = false
+            content = nil
+            loading = nil
         case .final(let m): loadFinal(m, id: id)
         case .live: loadLive(id: id)
         case .cloud: loadCloud(id: id)
@@ -278,6 +315,7 @@ struct ReviewView: View {
 
     private var sourceNote: String {
         switch source {
+        case .photo: return ""
         case .final: return "Modelo final de la PC con fotos (\(triangles / 1000) k triángulos). Es el más exacto para medir."
         case .live: return "Vista en vivo de la PC (resolución de 1 cm). Para medir con exactitud usa el modelo final."
         case .cloud: return "Nube rápida del iPhone (sin PC). Para medir con exactitud procesa en la PC."
@@ -291,6 +329,32 @@ struct ReviewView: View {
             .padding(.horizontal, 14).padding(.vertical, 9)
             .background(view == cam ? Color.white.opacity(0.28) : Color.white.opacity(0.1), in: Capsule())
     }
+}
+
+/// Página de la PC con la vista foto-realista (Gaussian Splatting), dentro de la app.
+struct PhotoWebView: UIViewRepresentable {
+    let url: URL
+
+    func makeUIView(context: Context) -> WKWebView {
+        let v = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        v.isOpaque = false
+        v.backgroundColor = UIColor(white: 0.06, alpha: 1)
+        v.scrollView.isScrollEnabled = false
+        v.scrollView.bounces = false
+        v.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
+        context.coordinator.url = url
+        return v
+    }
+
+    func updateUIView(_ v: WKWebView, context: Context) {
+        if context.coordinator.url != url {
+            context.coordinator.url = url
+            v.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator { var url: URL? }
 }
 
 /// Vista SceneKit: girar, acercar, doble toque para acercarse a un punto y toque para medir.

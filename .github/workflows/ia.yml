@@ -7,7 +7,6 @@ on:
       - "tools/ia_profundidad.py"
       - "tools/procesar_rgbd.py"
       - "tools/diagnostico_ia.py"
-      - "pc/gestion.py"
       - ".github/workflows/ia.yml"
   workflow_dispatch:
 

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Vista foto-realista</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0f1012; color: #e9e9ea; overflow: hidden;
+    font: 14px -apple-system, system-ui, "Segoe UI", sans-serif; -webkit-user-select: none; user-select: none; }
+  canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+  #msg { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); text-align: center;
+    background: rgba(30, 31, 34, .86); padding: 14px 18px; border-radius: 14px; max-width: 78%; line-height: 1.4; }
+  #msg[hidden] { display: none; }
+  #bar { height: 6px; border-radius: 99px; background: rgba(255,255,255,.12); overflow: hidden; margin-top: 10px; }
+  #bar > i { display: block; height: 100%; width: 0; background: #f5a821; }
+</style>
+</head>
+<body>
+<div id="msg"><div id="txt">Cargando la vista foto-realista…</div><div id="bar"><i></i></div></div>
+<script type="module">
+import * as THREE from './three.module.min.js';
+import { OrbitControls } from './OrbitControls.js';
+import * as GS3D from './gaussian-splats-3d.module.js';
+
+const carpeta = new URLSearchParams(location.search).get('carpeta') || '';
+const msg = document.getElementById('msg'), txt = document.getElementById('txt'), bar = document.querySelector('#bar > i');
+const fail = (t) => { txt.textContent = t; document.getElementById('bar').hidden = true; };
+
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x0f1012);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.02, 200);
+camera.position.set(2, 1.5, 2.5);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true; controls.dampingFactor = 0.12; controls.zoomSpeed = 1.2;
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+});
+
+// doble toque: acercarse a ese punto y girar alrededor de él
+let lastTap = 0;
+renderer.domElement.addEventListener('pointerup', (e) => {
+  const now = performance.now();
+  if (now - lastTap < 320 && viewer) {
+    const ndc = new THREE.Vector2((e.clientX / innerWidth) * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
+    const ray = new THREE.Raycaster(); ray.setFromCamera(ndc, camera);
+    // punto de la escena más cercano al rayo (entre una muestra de manchas)
+    let best = null, bd = 1e9; const p = new THREE.Vector3();
+    for (const c of sample) {
+      const t = p.copy(c).sub(ray.ray.origin).dot(ray.ray.direction);
+      if (t < 0.1) continue;
+      const d = ray.ray.distanceSqToPoint(c) / (t * t) + t * 1e-5;      // ángulo al rayo; de cerca primero
+      if (d < bd) { bd = d; best = c; }
+    }
+    if (best && bd < 0.002) {
+      const dir = camera.position.clone().sub(best).normalize();
+      const dist = Math.max(0.25, camera.position.distanceTo(best) * 0.45);
+      controls.target.copy(best); camera.position.copy(best).addScaledVector(dir, dist);
+    }
+  }
+  lastTap = now;
+});
+
+let viewer = null; const sample = [];
+async function load() {
+  if (!carpeta) return fail('Falta el escaneo.');
+  const url = '/telefono/vista_foto/' + encodeURIComponent(carpeta);
+  try {
+    viewer = new GS3D.DropInViewer({ gpuAcceleratedSort: false, sharedMemoryForWorkers: false,
+      sphericalHarmonicsDegree: 0, antialiased: true, sceneRevealMode: GS3D.SceneRevealMode.Instant,
+      halfPrecisionCovariancesOnGPU: true });
+    await viewer.addSplatScene(url, { format: GS3D.SceneFormat.Ply, showLoadingUI: false, splatAlphaRemovalThreshold: 5,
+      onProgress: (pct, _label, status) => { if (status === 0) bar.style.width = `${Math.round(pct)}%`; else txt.textContent = 'Preparando…'; } });
+    scene.add(viewer);
+    // encuadre: centro y tamaño a partir de una muestra de manchas
+    const mesh = viewer.splatMesh, n = mesh.getSplatCount(), step = Math.max(1, Math.floor(n / 4000));
+    const xs = [], ys = [], zs = [];
+    for (let i = 0; i < n; i += step) { const c = new THREE.Vector3(); mesh.getSplatCenter(i, c); sample.push(c); xs.push(c.x); ys.push(c.y); zs.push(c.z); }
+    const q = (a, f) => { a = a.slice().sort((x, y) => x - y); return a[Math.floor((a.length - 1) * f)]; };
+    const c = new THREE.Vector3(q(xs, .5), q(ys, .5), q(zs, .5));
+    const span = Math.max(q(xs, .95) - q(xs, .05), q(ys, .95) - q(ys, .05), q(zs, .95) - q(zs, .05), 0.5);
+    controls.target.copy(c); camera.position.set(c.x + span * 0.8, c.y + span * 0.5, c.z + span * 1.1);
+    msg.hidden = true;
+  } catch (e) {
+    fail('No se pudo abrir la vista foto-realista. Revisa que la PC siga prendida y en la misma red.');
+    console.warn(e);
+  }
+}
+load();
+(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+</script>
+</body>
+</html>

@@ -360,7 +360,8 @@ class Server:
              "--triangulos-textura", "1500000"] + (["--escala", str(escala), "1"] if escala else [])
             + (["--ia"] if usar_ia else []),
             [py, "-I", "-X", "utf8", os.path.join(TOOLS, "exportar_splat.py"), sdir,
-             "--salida", os.path.join(sdir, "splat"), "--nube", os.path.join(out, "nube_fusionada.ply")],
+             "--salida", os.path.join(sdir, "splat"), "--nube", os.path.join(out, "nube_fusionada.ply")]
+            + (["--escala", str(escala)] if escala else []),
         ]
         # avance: el primer programa va de 0 a 96 %, el de Gaussian Splatting el resto
         tramos = [(0.0, 0.96), (0.96, 1.0)]

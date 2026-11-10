@@ -365,7 +365,8 @@ class Gestion:
                 st = os.stat(p)
                 items.append({"carpeta": name, "nombre": name.replace("RGBD_", ""),
                               "fecha": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
-                              "version": int(st.st_mtime), "mb": round(st.st_size / 1e6, 1)})
+                              "version": int(st.st_mtime), "mb": round(st.st_size / 1e6, 1),
+                              "foto": os.path.exists(os.path.join(d, "resultado", "vista_foto.ply"))})
                 if len(items) >= 20:
                     break
         return web.json_response({"modelos": items})
@@ -923,6 +924,7 @@ class Gestion:
         app.router.add_get("/telefono/modelos.json", self.tel_modelos)        # para el iPhone (solo lectura)
         app.router.add_get("/telefono/modelo/{carpeta}", self.tel_modelo)
         app.router.add_get("/telefono/medidas/{carpeta}", self.tel_medidas)
+        app.router.add_route("*", "/telefono/vista_foto/{carpeta}", self.vista_foto)
         app.router.add_get("/app/info.json", self.app_info)          # visible para el iPhone en la red local
         app.router.add_get("/app/Levanta.ipa", self.app_ipa)
         self.publish_app_status()
