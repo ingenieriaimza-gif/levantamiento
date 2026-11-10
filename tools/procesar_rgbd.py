@@ -49,6 +49,22 @@ Y_UP_TO_Z_UP = np.array([[1, 0, 0, 0],
 PIXEL_OFFSET = float(os.environ.get("RGBD_PIXEL_OFFSET", "0.5"))
 
 
+def progreso(frac, etapa):
+    """Línea de avance para el programa de la PC (barra, porcentaje y tiempo restante)."""
+    print(f"@@PROGRESO {max(0.0, min(1.0, frac)):.4f}|{etapa}", flush=True)
+
+
+# avance total de este script (el programa de la PC deja el 4 % final para el Gaussian Splatting)
+# (pesos medidos en una corrida real: la malla y el modelo con fotos son lo más tardado)
+ETAPAS = {"carga": (0.00, 0.01), "nitidez": (0.01, 0.03), "fusion": (0.03, 0.12), "malla": (0.12, 0.25),
+          "fotos": (0.25, 0.89), "exportar": (0.89, 1.00)}
+
+
+def avance(etapa, f, texto):
+    a, b = ETAPAS[etapa]
+    progreso(a + (b - a) * f, texto)
+
+
 def log(msg):
     print(msg, flush=True)
 
@@ -157,7 +173,12 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
     used = frames
     dropped = 0
     if drop_blur and len(frames) > 10:
-        sh = np.array([sharpness(fr["jpg"]) for fr in frames])
+        sh = []
+        for i, fr in enumerate(frames):
+            sh.append(sharpness(fr["jpg"]))
+            if i % 20 == 0:
+                avance("nitidez", i / len(frames), "Revisando fotos movidas")
+        sh = np.array(sh)
         thr = 0.45 * np.median(sh)
         used = [fr for fr, s in zip(frames, sh) if s >= thr]
         dropped = len(frames) - len(used)
@@ -217,6 +238,8 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
                                                       trunc_voxel_multiplier=trunc_mult)
         vbg.integrate(coords, dimg, cimg, Kt, Et, 1000.0, dmax, trunc_voxel_multiplier=trunc_mult)
         n_ok += 1
+        if n % 5 == 0:
+            avance("fusion", (n + 1) / len(used), f"Uniendo cuadros {n + 1} de {len(used)}")
         if (n + 1) % 50 == 0:
             log(f"  {n + 1}/{len(used)} cuadros fusionados ({time.time() - t0:.0f} s)")
     if ia_aporte:
@@ -313,6 +336,7 @@ def main():
     os.makedirs(args.salida, exist_ok=True)
     work = tempfile.mkdtemp(prefix="rgbd_")
     try:
+        avance("carga", 0, "Leyendo lo que mandó el iPhone")
         dirs = extract_inputs(args.entradas, work)
         meta, frames = load_frames(dirs)
         log(f"Paquete: {len(frames)} cuadros en {len(dirs)} parte(s), "
@@ -331,6 +355,7 @@ def main():
         del ia
         log(f"Fusionados {used} cuadros ({dropped} descartados por borrosos)")
 
+        avance("malla", 0, "Formando las superficies")
         mesh, pcd = extract(vbg, args.lecturas)
         del vbg                                   # liberar el volumen antes de texturizar
         import gc
@@ -346,7 +371,10 @@ def main():
 
         tex_info = None
         if not args.sin_textura:
+            import texturizar
             from texturizar import texture_mesh
+            texturizar.AVANCE = lambda f, t: avance("fotos", f, t)
+            avance("fotos", 0, "Preparando las fotos")
             kf = [f for f in frames if f.get("kf", True)] or frames     # fotos clave (las más nítidas)
             tex_info = texture_mesh(mesh, kf, args.salida, dmax=args.dmax,
                                     target_triangles=args.triangulos_textura,
@@ -365,11 +393,14 @@ def main():
         cols = (np.clip(np.asarray(pcd.colors), 0, 1) * 255).round().astype(np.uint8)
 
         out = lambda n: os.path.join(args.salida, n)
+        avance("exportar", 0.0, "Guardando la nube")
         log("Exportando nube (PLY, E57)…")
         o3d.io.write_point_cloud(out("nube_fusionada.ply"), pcd, write_ascii=False)
         write_e57(out("nube_fusionada.e57"), pts, cols)
+        avance("exportar", 0.35, "Guardando la nube para Navisworks")
         log("Exportando nube para Navisworks (PTS)…")
         write_pts(out("nube_navisworks.pts"), pts, cols)
+        avance("exportar", 0.7, "Guardando la malla para Navisworks y SolidWorks")
         log("Exportando malla (PLY, STL)…")
         o3d.io.write_triangle_mesh(out("malla_color.ply"), mesh, write_ascii=False)
         gc.collect()

@@ -29,6 +29,15 @@
   #dot.on { background: var(--ok); }
   .panel { position: fixed; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; backdrop-filter: blur(8px); padding: 14px 16px; }
   #stats { top: 66px; left: 16px; display: flex; gap: 22px; }
+  #progress { top: 160px; left: 16px; width: min(440px, calc(100% - 32px)); display: flex; flex-direction: column; gap: 8px; }
+  .prog { display: flex; flex-direction: column; gap: 6px; }
+  .prog-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .prog-pct { font: 600 22px/1 var(--mono); font-variant-numeric: tabular-nums; }
+  .prog-time { font: 12px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+  .prog-bar { height: 8px; border-radius: 99px; background: rgba(255,255,255,.08); overflow: hidden; }
+  .prog-bar > i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: inherit; transition: width .6s ease; }
+  .prog-stage { font-size: 12px; color: var(--muted); }
+  .prog.done .prog-bar > i { background: var(--ok); }
   .stat { display: flex; flex-direction: column; }
   .stat b { font: 600 20px/1.1 var(--mono); font-variant-numeric: tabular-nums; }
   .stat span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
@@ -105,6 +114,7 @@
 </header>
 
 <section id="tab-visor">
+  <div id="progress" class="panel" hidden></div>
   <div id="stats" class="panel">
     <div class="stat"><b id="frames">0</b><span>cuadros</span></div>
     <div class="stat"><b id="kf">0</b><span>fotos clave</span></div>
@@ -291,7 +301,56 @@ function onStatus(s) {
   $('frames').textContent = s.cuadros.toLocaleString('es-MX');
   $('kf').textContent = s.clave.toLocaleString('es-MX');
   if (s.mensaje && s.mensaje !== lastMsg) { log(s.mensaje); lastMsg = s.mensaje; }
+  onProgress(s.progreso || null, !!s.procesando);
 }
+
+// ---------- avance de "crear el modelo 3D"
+let progress = null, wasProcessing = false, doneAt = null;
+const mins = (sec) => {
+  if (sec == null) return null;
+  if (sec < 60) return 'menos de 1 min';
+  const m = Math.round(sec / 60);
+  return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`;
+};
+function progressView(p) {
+  const done = p.fraccion >= 1;
+  // entre avisos de la PC el tiempo sigue corriendo: restar lo que pasó desde el último
+  const passed = p._at ? (Date.now() - p._at) / 1000 : 0;
+  p = { ...p, restante_s: p.restante_s == null ? null : Math.max(30, p.restante_s - passed),
+        transcurrido_s: p.transcurrido_s == null ? null : p.transcurrido_s + passed };
+  const pct = Math.floor(p.fraccion * 100);
+  const time = done ? `tardó ${mins(p.transcurrido_s) || '—'}`
+    : (p.restante_s != null ? `faltan ~${mins(p.restante_s)}` : 'calculando el tiempo…');
+  const lleva = !done && p.transcurrido_s != null ? ` · lleva ${mins(p.transcurrido_s)}` : '';
+  const box = el('div', { className: 'prog' + (done ? ' done' : '') },
+    el('div', { className: 'prog-head' },
+      el('span', { className: 'prog-pct', textContent: `${pct} %` }),
+      el('span', { className: 'prog-time', textContent: time + lleva })),
+    el('div', { className: 'prog-bar' }, el('i')),
+    el('div', { className: 'prog-stage', textContent: done ? 'Modelo listo' : p.etapa }));
+  box.setAttribute('role', 'progressbar');
+  box.setAttribute('aria-valuemin', '0'); box.setAttribute('aria-valuemax', '100'); box.setAttribute('aria-valuenow', String(pct));
+  box.querySelector('.prog-bar > i').style.width = `${Math.max(1, pct)}%`;
+  return box;
+}
+function onProgress(p, processing) {
+  if (p) p._at = Date.now();
+  progress = p;
+  const panel = $('progress');
+  const recent = p && p.fraccion >= 1 && !processing && (doneAt ??= Date.now()) > Date.now() - 30000;
+  if (!p || processing) doneAt = null;
+  if (p && (processing || recent)) {
+    panel.hidden = false;
+    panel.replaceChildren(el('div', { className: 'muted', textContent: `Creando el modelo 3D · ${p.carpeta.replace('RGBD_', '')}` }), progressView(p));
+  } else panel.hidden = true;
+  for (const slot of document.querySelectorAll('.prog-slot')) {
+    if (p && slot.dataset.carpeta === p.carpeta) slot.replaceChildren(progressView(p));
+  }
+  if (wasProcessing && !processing && !$('tab-escaneos').hidden) loadScans();
+  wasProcessing = processing;
+}
+setInterval(() => { if (progress && wasProcessing) {
+  const p = progress, at = p._at; onProgress(p, true); p._at = at; } }, 1000);
 
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/visor`);
@@ -549,7 +608,11 @@ async function loadScans() {
         pills.append(el('span', { className: 'pill', textContent: 'descartado' }));
       } else if (s.procesando) {
         pills.append(el('span', { className: 'pill warn', textContent: 'creando el modelo 3D…' }));
-        body.append(el('div', { className: 'muted', textContent: 'La PC está convirtiendo lo que mandó el iPhone en el modelo 3D. Tarda unos minutos; el avance se ve en la pestaña Visor.' }));
+        const slot = el('div', { className: 'prog-slot' });
+        slot.dataset.carpeta = s.carpeta;
+        if (progress && progress.carpeta === s.carpeta) slot.append(progressView(progress));
+        else slot.append(el('div', { className: 'muted', textContent: 'Empezando…' }));
+        body.append(slot);
       } else if (s.en_curso && s.iphone_conectado) {
         pills.append(el('span', { className: 'pill warn', textContent: 'escaneando' }));
         body.append(el('div', { className: 'muted', textContent: 'Cuando termines, en el iPhone toca "Terminar y procesar en la PC".' }));
@@ -557,9 +620,16 @@ async function loadScans() {
         pills.append(el('span', { className: 'pill warn', textContent: 'sin terminar' }));
         body.append(el('div', { className: 'muted', textContent: 'El iPhone se desconectó antes de terminar. Lo recibido está guardado: puedes crear el modelo con eso.' }));
         actions.append(crear('Terminar y crear el modelo 3D'));
+      } else if (!s.con_modelo && s.error) {
+        pills.append(el('span', { className: 'pill warn', textContent: 'no se pudo crear el modelo' }));
+        body.append(el('div', { className: 'muted', textContent: `Motivo: ${s.error}` }));
+        actions.append(crear('Intentar de nuevo'));
+        const det = el('button', { className: 'btn', type: 'button', textContent: 'Ver detalle' });
+        det.onclick = () => post('/api/abrir', { ruta: ruta('error.txt') });
+        actions.append(det);
       } else if (!s.con_modelo) {
         pills.append(el('span', { className: 'pill warn', textContent: s.procesado ? 'el modelo no se terminó' : 'falta crear el modelo' }));
-        body.append(el('div', { className: 'muted', textContent: 'Aquí solo están las fotos y medidas del iPhone. "Crear modelo 3D" las convierte en los archivos para Navisworks y SolidWorks.' }));
+        body.append(el('div', { className: 'muted', textContent: 'Aquí solo están las fotos y medidas del iPhone. "Crear modelo 3D" las convierte en los archivos para Navisworks y SolidWorks (tarda unos minutos y verás el avance).' }));
         actions.append(crear('Crear modelo 3D'));
       } else {
         pills.append(el('span', { className: 'pill ok', textContent: 'modelo listo' }));

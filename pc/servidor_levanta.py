@@ -24,6 +24,7 @@ import asyncio
 import concurrent.futures
 import json
 import os
+import collections
 import socket
 import struct
 import subprocess
@@ -361,25 +362,69 @@ class Server:
             [py, "-I", "-X", "utf8", os.path.join(TOOLS, "exportar_splat.py"), sdir,
              "--salida", os.path.join(sdir, "splat"), "--nube", os.path.join(out, "nube_fusionada.ply")],
         ]
+        # avance: el primer programa va de 0 a 96 %, el de Gaussian Splatting el resto
+        tramos = [(0.0, 0.96), (0.96, 1.0)]
+        t0 = time.time()
+        ultimas = collections.deque(maxlen=40)
+        err_path = os.path.join(out, "error.txt")
         try:
-            for cmd in cmds:
+            os.remove(err_path)
+        except OSError:
+            pass
+        self.status["progreso"] = {"carpeta": os.path.basename(sdir), "fraccion": 0.0,
+                                   "etapa": "Empezando", "restante_s": None}
+        await self.send_status("Creando el modelo 3D…")
+        last_sent = 0.0
+        fallo = None
+        try:
+            for (a, b), cmd in zip(tramos, cmds):
                 proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
                                                             stderr=asyncio.subprocess.STDOUT,
                                                             creationflags=NO_WINDOW)
                 async for line in proc.stdout:
                     text = line.decode("utf-8", errors="replace").rstrip()
-                    if text and not text.startswith("Warning"):
-                        await self.send_status(text)
+                    if not text or text.startswith("Warning"):
+                        continue
+                    if text.startswith("@@PROGRESO "):
+                        try:
+                            f, etapa = text[11:].split("|", 1)
+                            frac = a + (b - a) * float(f)
+                        except ValueError:
+                            continue
+                        el = time.time() - t0
+                        # tiempo restante: lo que ha tardado, repartido según el avance (se estabiliza solo)
+                        rest = el / frac - el if frac > 0.07 else None
+                        prev = self.status["progreso"].get("restante_s")
+                        if rest is not None and prev is not None:
+                            rest = 0.7 * prev + 0.3 * rest
+                        self.status["progreso"] = {"carpeta": os.path.basename(sdir), "fraccion": round(frac, 4),
+                                                   "etapa": etapa, "restante_s": None if rest is None else round(rest),
+                                                   "transcurrido_s": round(el)}
+                        if time.time() - last_sent > 1.0:
+                            last_sent = time.time()
+                            await self.send_status()
+                        continue
+                    ultimas.append(text)
+                    await self.send_status(text)
                 await proc.wait()
                 if proc.returncode != 0:
-                    await self.send_status(f"El procesamiento falló (código {proc.returncode}). "
-                                           f"Los datos están en {sdir}")
+                    fallo = f"El programa terminó con error (código {proc.returncode})."
                     break
+        except Exception as e:      # noqa: BLE001
+            fallo = f"{e}"
+        try:
+            if fallo:
+                os.makedirs(out, exist_ok=True)
+                with open(err_path, "w", encoding="utf-8") as f:
+                    f.write(fallo + "\n\n" + "\n".join(ultimas) + "\n")
+                self.status["progreso"] = None
+                await self.send_status(f"No se pudo crear el modelo: {fallo} Detalle en resultado\\error.txt")
             else:
                 self.status["resultados"].append(sdir)
+                self.status["progreso"] = {"carpeta": os.path.basename(sdir), "fraccion": 1.0,
+                                           "etapa": "Listo", "restante_s": 0,
+                                           "transcurrido_s": round(time.time() - t0)}
                 await self.send_status(f"Listo. Resultados en {out}")
-        except Exception as e:      # noqa: BLE001
-            await self.send_status(f"El procesamiento falló: {e}. Los datos están en {sdir}")
         finally:
             self.status["procesando"] = False
             await self.send_status()

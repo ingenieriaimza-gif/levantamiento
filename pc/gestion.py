@@ -218,6 +218,14 @@ def _asset(release, name):
     return None
 
 
+def _first_line(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.readline().strip() or "error sin detalle"
+    except OSError:
+        return None
+
+
 def open_path(path):
     if sys.platform.startswith("win"):
         os.startfile(path)                         # noqa: S606
@@ -326,6 +334,7 @@ class Gestion:
                     "iphone_conectado": self.server.phone is not None,
                     "procesando": bool(processing),
                     "con_modelo": any(f["nombre"] == "malla_solidworks.stl" for f in files),
+                    "error": _first_line(os.path.join(res, "error.txt")),
                     "nombre": name.replace("RGBD_", ""),
                     "carpeta": name,
                     "fecha": datetime.fromtimestamp(os.path.getmtime(d)).strftime("%Y-%m-%d %H:%M"),

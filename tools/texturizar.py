@@ -24,6 +24,15 @@ def _log(msg):
     print(msg, flush=True)
 
 
+# avance (0–1) de esta etapa; procesar_rgbd lo conecta a la barra del programa
+AVANCE = None
+
+
+def _avance(f, texto):
+    if AVANCE is not None:
+        AVANCE(f, texto)
+
+
 def _face_adjacency(F):
     """Pares de caras que comparten arista."""
     e = np.concatenate([F[:, [0, 1]], F[:, [1, 2]], F[:, [2, 0]]])
@@ -62,6 +71,7 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     to_z_up: matriz 4×4 opcional para el OBJ (Z arriba).
     """
     t0 = time.time()
+    _avance(0.0, "Simplificando la malla para las fotos")
     m = o3d.geometry.TriangleMesh(mesh)
     if len(m.triangles) > target_triangles:
         m = m.simplify_quadric_decimation(target_triangles)
@@ -86,6 +96,7 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     second_frame = np.full(nF, -1, np.int32)
     proj_cache = {}
 
+    _avance(0.38, "Revisando la nitidez de las fotos")
     sharp = []
     for fr in frames:
         g = cv2.imread(fr["jpg"], cv2.IMREAD_GRAYSCALE)
@@ -163,6 +174,8 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         sec = score[~better] > second_score[jj]
         second_score[jj[sec]] = score[~better][sec]
         second_frame[jj[sec]] = k
+        if k % 5 == 0:
+            _avance(0.40 + 0.22 * (k + 1) / K, f"Eligiendo la mejor foto para cada zona ({k + 1} de {K})")
         if (k + 1) % 50 == 0:
             _log(f"  {k + 1}/{K} fotos evaluadas ({time.time() - t0:.0f} s)")
 
@@ -171,6 +184,7 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
 
     # suavizado de etiquetas: cambiar a la etiqueta mayoritaria de los vecinos si esa foto también
     # ve bien el triángulo (es su mejor o segunda mejor opción), para hacer parches grandes
+    _avance(0.62, "Uniendo zonas con la misma foto")
     adj = _face_adjacency(F)
     for _ in range(smooth_iters):
         a, b = adj[:, 0], adj[:, 1]
@@ -222,7 +236,10 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     pages = [np.full((page_size, page_size, 3), 128, np.uint8) for _ in range(n_pages)]
     page_of = np.zeros(nF, np.int32)
     face_uv = np.zeros((nF, 3, 2))
+    _avance(0.66, "Armando la textura con las fotos")
     for j, k in enumerate(used):
+        if j % 10 == 0:
+            _avance(0.66 + 0.09 * j / max(1, len(used)), "Armando la textura con las fotos")
         (lo, hi), (pg, px, py) = crops[k], place[j]
         img = cv2.imread(frames[k]["jpg"], cv2.IMREAD_COLOR)
         crop = img[lo[1]:hi[1] + 1, lo[0]:hi[0] + 1]
@@ -246,6 +263,7 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         pages[gpg][gy:gy + 8, gx:gx + 8] = gray
 
     os.makedirs(out_dir, exist_ok=True)
+    _avance(0.75, "Guardando el modelo con fotos")
     _export(V * scale, F, face_uv, page_of, pages, out_dir, to_z_up)
     _log(f"  {len(used)} fotos usadas, {n_pages} página(s) de textura {page_size}², {time.time() - t0:.0f} s")
     return {"triangles": nF, "photos_used": int(len(used)), "pages": n_pages,

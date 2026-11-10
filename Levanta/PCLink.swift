@@ -25,6 +25,10 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     @Published private(set) var pcFrames = 0
     @Published private(set) var pcMessage = ""
     @Published private(set) var pcProcessing = false
+    /// Avance de "crear el modelo 3D" en la PC (0–1), etapa y segundos restantes.
+    @Published private(set) var pcProgress: Double?
+    @Published private(set) var pcStage = ""
+    @Published private(set) var pcRemaining: Int?
     /// Versión de la app del iPhone guardada en la PC (0 si no hay).
     @Published private(set) var pcAppBuild = 0
     @Published private(set) var pcAppVersion = ""
@@ -216,7 +220,14 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
             let proc = (u.header["procesando"] as? NSNumber)?.boolValue ?? false
             let appBuild = (u.header["app_build"] as? NSNumber)?.intValue ?? 0
             let appVersion = u.header["app_version"] as? String ?? ""
+            let prog = u.header["progreso"] as? [String: Any]
+            let frac = (prog?["fraccion"] as? NSNumber)?.doubleValue
+            let stage = prog?["etapa"] as? String ?? ""
+            let rest = (prog?["restante_s"] as? NSNumber)?.intValue
             DispatchQueue.main.async {
+                self.pcProgress = proc ? frac : nil
+                self.pcStage = stage
+                self.pcRemaining = rest
                 self.pcFrames = frames
                 self.pcMessage = msg
                 self.pcProcessing = proc

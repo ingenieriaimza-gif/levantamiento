@@ -410,22 +410,54 @@ struct PCFinishButton: View {
     @State private var confirm = false
 
     var body: some View {
+        if link.pcProcessing {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Creando el modelo en la PC").font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Text(link.pcProgress.map { "\(Int($0 * 100)) %" } ?? "…")
+                        .font(.subheadline.monospacedDigit().weight(.bold))
+                }
+                ProgressView(value: link.pcProgress ?? 0)
+                    .tint(Color(red: 0.96, green: 0.66, blue: 0.13))
+                HStack {
+                    Text(link.pcStage).lineLimit(1)
+                    Spacer()
+                    Text(remainingText)
+                }
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+            }
+            .padding(12)
+            .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
+        } else {
+            finishButton
+        }
+    }
+
+    private var remainingText: String {
+        guard let r = link.pcRemaining else { return "calculando…" }
+        if r < 60 { return "falta menos de 1 min" }
+        let m = Int((Double(r) / 60).rounded())
+        return m < 60 ? "faltan ~\(m) min" : "faltan ~\(m / 60) h \(m % 60) min"
+    }
+
+    private var finishButton: some View {
         Button {
             confirm = true
         } label: {
-            Label(link.pcProcessing ? "La PC está procesando…" : "Terminar y procesar en la PC",
-                  systemImage: "checkmark.circle.fill")
+            Label("Terminar y crear el modelo en la PC", systemImage: "checkmark.circle.fill")
                 .font(.subheadline.weight(.semibold))
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .background(Color.white.opacity(0.14), in: RoundedRectangle(cornerRadius: 12))
         }
-        .disabled(!link.isConnected || link.pcProcessing || link.pcFrames == 0)
+        .disabled(!link.isConnected || link.pcFrames == 0)
         .confirmationDialog("¿Terminar el escaneo?", isPresented: $confirm, titleVisibility: .visible) {
-            Button("Terminar y procesar") { engine.finishOnPC() }
+            Button("Terminar y crear el modelo") { engine.finishOnPC() }
             Button("Seguir escaneando", role: .cancel) {}
         } message: {
-            Text("La PC generará la nube E57, el STL para SolidWorks, el modelo con fotos y los datos para Gaussian Splatting.")
+            Text("La PC creará los archivos para Navisworks y SolidWorks y el modelo con fotos. Verás el avance aquí y en la PC.")
         }
     }
 }
