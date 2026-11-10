@@ -91,7 +91,7 @@ jobs:
           $res = "prueba\RGBD_prueba_simulada\resultado"
           Get-ChildItem $res | Format-Table Name, Length
           Get-Content "$res\reporte.txt"
-          foreach ($f in "nube_fusionada.e57", "malla_solidworks.stl", "modelo_texturizado.usdz", "modelo_texturizado.glb") {
+          foreach ($f in "nube_fusionada.e57", "malla_solidworks.stl", "modelo_texturizado.usdz", "modelo_texturizado.glb", "modelo_solidworks.3mf", "obj\modelo_navisworks.fbx") {
             if (-not (Test-Path "$res\$f")) { Write-Error "Falta $f" }
           }
           if (-not (Test-Path "prueba\RGBD_prueba_simulada\splat\sparse\0\images.txt")) { Write-Error "Faltan datos para splat" }

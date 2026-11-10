@@ -477,6 +477,8 @@ def main():
             f"Extensión (X × Y × Z): {hi[0] - lo[0]:.3f} × {hi[1] - lo[1]:.3f} × {hi[2] - lo[2]:.3f} m",
             "Sistema: Z hacia arriba; STL y OBJ en milímetros (nube en metros). Origen: donde arrancó el escaneo.",
             "Para medir e interferencias exactas: malla_solidworks.stl (solo lecturas de alta confianza).",
+            "Con colores y texturas: Navisworks -> obj/modelo_navisworks.fbx (junto a sus textura_*.jpg);",
+            "SolidWorks 2021+ -> modelo_solidworks.3mf (textura dentro del archivo).",
             "El modelo con fotos usa esa misma malla exacta y además rellena zonas de confianza media",
             "(piso, objetos oscuros, lo lejano); en esas zonas rellenadas la medida puede variar unos mm.",
         ]

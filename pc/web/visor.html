@@ -736,12 +736,14 @@ async function loadScans() {
             fileRow('Archivo HTML', 'doble clic: se abre en Edge o Chrome, se mueve y se mide; sirve para compartir', s.html.nombre));
         }
         grupo('Navisworks (interferencias)',
-          fileRow('Modelo con fotos', 'se ve como el lugar real y sirve en Clash Detective; en milímetros', 'obj/modelo_texturizado.obj', 'modelo_texturizado.obj'),
-          fileRow('Malla sin color', 'más ligera; en milímetros', 'malla_solidworks.stl'));
+          fileRow('Modelo con fotos (FBX)', 'con colores y texturas; sirve en Clash Detective; en milímetros. Déjalo junto a sus imágenes textura_*.jpg', 'obj/modelo_navisworks.fbx', 'modelo_navisworks.fbx'),
+          fileRow('Malla sin color (STL)', 'más ligera; en milímetros', 'malla_solidworks.stl'));
         grupo('SolidWorks',
-          fileRow('Malla del espacio', 'Abrir como cuerpo de gráficos e Insertar › Componente; en milímetros', 'malla_solidworks.stl'));
+          fileRow('Modelo con fotos (3MF)', 'con colores y texturas (SolidWorks 2021 o más nuevo): Abrir como cuerpo de gráficos; en milímetros', 'modelo_solidworks.3mf'),
+          fileRow('Malla sin color (STL)', 'más ligera y exacta: Abrir como cuerpo de gráficos e Insertar › Componente; en milímetros', 'malla_solidworks.stl'));
         grupo('Otros',
           fileRow('Modelo con fotos', 'para el iPhone (Vista rápida) o AR', 'modelo_texturizado.usdz'),
+          fileRow('Modelo con fotos (OBJ)', 'para otros programas 3D; en milímetros', 'obj/modelo_texturizado.obj', 'modelo_texturizado.obj'),
           fileRow('Nube E57', 'para ReCap u otros programas', 'nube_fusionada.e57'),
           fileRow('Reporte', 'medidas generales y datos del proceso', 'reporte.txt'));
         if (has('modelo_texturizado.glb')) {

@@ -378,6 +378,7 @@ def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
     obj_lines = ["mtllib modelo_texturizado.mtl"]
     mtl_lines = []
     usd_parts = []
+    cad_parts = []          # para FBX (Navisworks) y 3MF (SolidWorks): mm, Z arriba
     v_off = 0
     for pg, img in enumerate(pages):
         sel = np.nonzero(page_of == pg)[0]
@@ -409,6 +410,8 @@ def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
         mtl_lines += [f"newmtl pagina_{pg}", "Ka 1 1 1", "Kd 1 1 1", "Ks 0 0 0", "d 1", "illum 1",
                       f"map_Kd {tex_name}", ""]
         vz = Vz[uk[:, 0].astype(int)]
+        good = (faces[:, 0] != faces[:, 1]) & (faces[:, 1] != faces[:, 2]) & (faces[:, 0] != faces[:, 2])
+        cad_parts.append((pg, vz * 1000.0, faces[good], uv_unique, tex_name))
         obj_lines.append(f"o pagina_{pg}")
         obj_lines += [f"v {p[0]:.2f} {p[1]:.2f} {p[2]:.2f}" for p in vz * 1000.0]   # milímetros, como el STL
         obj_lines += [f"vt {q[0]:.6f} {q[1]:.6f}" for q in uv_unique]
@@ -426,6 +429,13 @@ def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
         f.write("\n".join(obj_lines) + "\n")
     with open(os.path.join(obj_dir, "modelo_texturizado.mtl"), "w") as f:
         f.write("\n".join(mtl_lines) + "\n")
+    del obj_lines
+    # mismos datos para Navisworks (FBX con texturas) y SolidWorks (3MF con texturas)
+    from formatos_cad import write_3mf, write_fbx
+    _avance(0.9, "Guardando el modelo con fotos para Navisworks (FBX)")
+    write_fbx(os.path.join(obj_dir, "modelo_navisworks.fbx"), cad_parts)
+    _avance(0.95, "Guardando el modelo con fotos para SolidWorks (3MF)")
+    write_3mf(os.path.join(out_dir, "modelo_solidworks.3mf"), cad_parts, obj_dir)
 
 
 def _export_usdz(parts, tex_dir, usdz_path):
