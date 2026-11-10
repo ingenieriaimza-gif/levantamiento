@@ -589,7 +589,8 @@ async function loadPhotoView(carpeta) {
     if (!head.ok || viewing !== carpeta) return;
     setHint('Cargando la vista foto-realista…');
     const v = new GS3D.DropInViewer({ gpuAcceleratedSort: false, sharedMemoryForWorkers: false,
-      sphericalHarmonicsDegree: 1, antialiased: true, sceneRevealMode: GS3D.SceneRevealMode.Instant });
+      sphericalHarmonicsDegree: 0, antialiased: false, halfPrecisionCovariancesOnGPU: true, integerBasedSort: true,
+      sceneRevealMode: GS3D.SceneRevealMode.Instant });
     await v.addSplatScene(url, { format: GS3D.SceneFormat.Ply, showLoadingUI: false, splatAlphaRemovalThreshold: 5 });
     if (viewing !== carpeta) { try { v.dispose(); } catch (e) { /* nada */ } return; }
     splat = v; scene.add(splat);

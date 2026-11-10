@@ -189,8 +189,10 @@ const $ = (id) => document.getElementById(id);
 const b64 = (id) => { const s = atob($(id).textContent.trim()); const u = new Uint8Array(s.length);
   for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u.buffer; };
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 2));
+const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
+// resolución adaptable: más baja mientras se mueve (fluido) y completa al soltar (nítido)
+const PR_QUIETO = Math.min(devicePixelRatio || 1, 1.5), PR_MOVIENDO = Math.min(devicePixelRatio || 1, 1) * 0.6;
+renderer.setPixelRatio(PR_QUIETO);
 renderer.setSize(innerWidth, innerHeight);
 renderer.setClearColor(0x0f1012);
 document.body.prepend(renderer.domElement);
@@ -198,6 +200,9 @@ const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.01, 300);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true; controls.dampingFactor = 0.12;
+let restTimer = null;
+controls.addEventListener('start', () => { clearTimeout(restTimer); renderer.setPixelRatio(PR_MOVIENDO); });
+controls.addEventListener('end', () => { restTimer = setTimeout(() => renderer.setPixelRatio(PR_QUIETO), 250); });
 addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); });
 
@@ -228,7 +233,8 @@ frame(false);
 // vista foto-realista
 let splat = null, photo = true;
 const viewer = new GS3D.DropInViewer({ gpuAcceleratedSort: false, sharedMemoryForWorkers: false,
-  sphericalHarmonicsDegree: 0, antialiased: true, sceneRevealMode: GS3D.SceneRevealMode.Instant });
+  sphericalHarmonicsDegree: 0, antialiased: false, halfPrecisionCovariancesOnGPU: true, integerBasedSort: true,
+  sceneRevealMode: GS3D.SceneRevealMode.Instant });
 const splatURL = URL.createObjectURL(new Blob([b64('data-splat')]));
 viewer.addSplatScene(splatURL, { format: GS3D.SceneFormat.Splat, showLoadingUI: false, splatAlphaRemovalThreshold: 5 })
   .then(() => { splat = viewer; scene.add(viewer); $('msg').hidden = true; look(); })
@@ -341,7 +347,7 @@ def main():
     ap = argparse.ArgumentParser(description="Vista foto-realista -> archivo HTML único con medición")
     ap.add_argument("carpeta", help="carpeta del escaneo (con resultado/vista_foto.ply)")
     ap.add_argument("--salida")
-    ap.add_argument("--max-manchas", type=int, default=2_500_000)
+    ap.add_argument("--max-manchas", type=int, default=900_000)
     ap.add_argument("--max-triangulos", type=int, default=500_000)
     args = ap.parse_args()
     res = os.path.join(args.carpeta, "resultado")

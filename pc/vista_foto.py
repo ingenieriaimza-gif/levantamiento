@@ -29,9 +29,13 @@ URL = f"https://github.com/ArthurBrussee/brush/releases/download/{VERSION}/{ARCH
 NO_WINDOW = 0x08000000 if WINDOWS else 0
 
 # Configuración fija (pensada para una RTX 4060 de 8 GB)
-PASOS = int(os.environ.get("LEVANTA_FOTO_PASOS", "12000"))          # pasos de entrenamiento
-MAX_RESOLUCION = int(os.environ.get("LEVANTA_FOTO_RES", "1600"))    # lado largo de las fotos al entrenar
-MAX_SPLATS = 2_000_000   # tope de "manchas": cabe en 8 GB y se mueve fluido en el visor
+# Rápida y ligera: la mitad de pasos y de manchas que antes (la mayor parte del parecido se logra en
+# los primeros miles de pasos; la nube del LiDAR ya da la forma). Termina en la mitad del tiempo y el
+# resultado pesa la mitad, así se mueve fluido en el visor y en el archivo HTML.
+PASOS = int(os.environ.get("LEVANTA_FOTO_PASOS", "6000"))           # pasos de entrenamiento
+MAX_RESOLUCION = int(os.environ.get("LEVANTA_FOTO_RES", "1440"))    # lado largo de las fotos al entrenar
+MAX_SPLATS = 1_000_000   # tope de "manchas"
+CRECER_HASTA = 0.75      # fracción de los pasos en que se dejan de agregar manchas (luego solo se afinan)
 GRADO_SH = 1             # reflejos según el ángulo: 1 basta en interiores y el archivo pesa 3 veces menos
 
 
@@ -96,7 +100,8 @@ def descargar_motor(avance=None):
 
 def comando(exe, datos, salida_dir, nombre, pasos=PASOS, max_res=MAX_RESOLUCION, max_splats=MAX_SPLATS):
     return [exe, datos, "--total-steps", str(pasos), "--max-resolution", str(max_res),
-            "--max-splats", str(max_splats), "--sh-degree", str(GRADO_SH), "--export-every", str(pasos),
+            "--max-splats", str(max_splats), "--sh-degree", str(GRADO_SH),
+            "--growth-stop-iter", str(int(pasos * CRECER_HASTA)), "--export-every", str(pasos),
             "--export-path", salida_dir, "--export-name", nombre]
 
 

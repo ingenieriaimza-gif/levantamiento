@@ -27,7 +27,7 @@ const msg = document.getElementById('msg'), txt = document.getElementById('txt')
 const fail = (t) => { txt.textContent = t; document.getElementById('bar').hidden = true; };
 
 const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
 renderer.setSize(innerWidth, innerHeight);
 renderer.setClearColor(0x0f1012);
 document.body.appendChild(renderer.domElement);
@@ -70,7 +70,7 @@ async function load() {
   const url = '/telefono/vista_foto/' + encodeURIComponent(carpeta);
   try {
     viewer = new GS3D.DropInViewer({ gpuAcceleratedSort: false, sharedMemoryForWorkers: false,
-      sphericalHarmonicsDegree: 0, antialiased: true, sceneRevealMode: GS3D.SceneRevealMode.Instant,
+      sphericalHarmonicsDegree: 0, antialiased: false, integerBasedSort: true, sceneRevealMode: GS3D.SceneRevealMode.Instant,
       halfPrecisionCovariancesOnGPU: true });
     await viewer.addSplatScene(url, { format: GS3D.SceneFormat.Ply, showLoadingUI: false, splatAlphaRemovalThreshold: 5,
       onProgress: (pct, _label, status) => { if (status === 0) bar.style.width = `${Math.round(pct)}%`; else txt.textContent = 'Preparando…'; } });
