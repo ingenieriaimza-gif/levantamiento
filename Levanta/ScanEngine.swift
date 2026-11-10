@@ -92,6 +92,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var keys: [Int64] = []          // llave de cada vóxel (para borrarlo del índice)
     private var misses: [UInt16] = []       // veces que el LiDAR vio a través del punto
     private var nearCounts: [UInt16] = []   // lecturas tomadas de cerca (≤ 1.5 m): las de buena calidad
+    private var closeCounts: [UInt16] = []  // lecturas muy de cerca (≤ 1.0 m): las de calidad excelente
+    private var firstDir: [SIMD3<Int8>] = [] // dirección de la primera lectura muy de cerca (0,0,0 = ninguna)
+    private var diverse: [Bool] = []        // ya se leyó muy de cerca desde ángulos distintos (≥ 30°)
     private var activeCleanNoise = true
     private var carveCursor = 0
     private var removedTotal = 0
@@ -257,6 +260,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             self.keys.removeAll(keepingCapacity: false)
             self.misses.removeAll(keepingCapacity: false)
             self.nearCounts.removeAll(keepingCapacity: false)
+            self.closeCounts.removeAll(keepingCapacity: false)
+            self.firstDir.removeAll(keepingCapacity: false)
+            self.diverse.removeAll(keepingCapacity: false)
             self.carveCursor = 0
             self.removedTotal = 0
             DispatchQueue.main.async { self.removedPoints = 0 }
@@ -513,6 +519,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let cx = (K[2][0] + 0.5) * sx - 0.5
         let cy = (K[2][1] + 0.5) * sy - 0.5
         let T = frame.camera.transform
+        let camPos = SIMD3<Float>(T.columns.3.x, T.columns.3.y, T.columns.3.z)
 
         let inv = 1.0 / activeVoxel
         let maxD = activeMaxDepth
@@ -560,6 +567,15 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 let c = SIMD3<Float>(r, g, b)
 
                 let near: UInt16 = d <= 1.5 ? 1 : 0
+                let close = d <= 1.0
+                var dirQ = SIMD3<Int8>(0, 0, 0)
+                var dirF = SIMD3<Float>(0, 0, 0)
+                if close {
+                    dirF = simd_normalize(p - camPos)
+                    let q = simd_clamp(dirF * 127, SIMD3<Float>(repeating: -127), SIMD3<Float>(repeating: 127))
+                    dirQ = SIMD3<Int8>(Int8(q.x.rounded()), Int8(q.y.rounded()), Int8(q.z.rounded()))
+                    if dirQ == SIMD3<Int8>(0, 0, 0) { dirQ.z = 1 }
+                }
                 if let idx = keyToIndex[key] {
                     let i = Int(idx)
                     if counts[i] < 50_000 {
@@ -567,6 +583,16 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                         colorSums[i] += c
                         counts[i] += 1
                         nearCounts[i] += near
+                        if close {
+                            closeCounts[i] &+= 1
+                            let f0 = firstDir[i]
+                            if f0 == SIMD3<Int8>(0, 0, 0) {
+                                firstDir[i] = dirQ
+                            } else if !diverse[i] {
+                                let a = simd_normalize(SIMD3<Float>(Float(f0.x), Float(f0.y), Float(f0.z)))
+                                if simd_dot(a, dirF) < 0.866 { diverse[i] = true }      // más de 30° de diferencia
+                            }
+                        }
                     }
                 } else {
                     keyToIndex[key] = Int32(sums.count)
@@ -576,6 +602,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                     keys.append(key)
                     misses.append(0)
                     nearCounts.append(near)
+                    closeCounts.append(close ? 1 : 0)
+                    firstDir.append(dirQ)
+                    diverse.append(false)
                 }
             }
         }
@@ -658,10 +687,12 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             if i != last {
                 sums[i] = sums[last]; colorSums[i] = colorSums[last]; counts[i] = counts[last]
                 keys[i] = keys[last]; misses[i] = misses[last]; nearCounts[i] = nearCounts[last]
+                closeCounts[i] = closeCounts[last]; firstDir[i] = firstDir[last]; diverse[i] = diverse[last]
                 keyToIndex[keys[i]] = Int32(i)
             }
             sums.removeLast(); colorSums.removeLast(); counts.removeLast()
             keys.removeLast(); misses.removeLast(); nearCounts.removeLast()
+            closeCounts.removeLast(); firstDir.removeLast(); diverse.removeLast()
         }
         removedTotal += toRemove.count
         let total = removedTotal
@@ -747,14 +778,18 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     /// Calidad de cada zona (no solo si ya se vio):
+    /// verde oscuro = excelente: leída muy de cerca (≤ 1 m) varias veces y desde ángulos distintos
+    ///   (≥ 30°) → ya no vale la pena seguir pasando por ahí;
     /// verde = leída de cerca (≤ 1.5 m) desde al menos 2 vistas → sale nítida y exacta;
     /// amarillo = vista, pero de lejos o desde una sola vista → acércate o rodéala;
     /// rojo = apenas vista.
-    static let qualityGood = SIMD3<Float>(0.25, 0.85, 0.40)
+    static let qualityExcellent = SIMD3<Float>(0.02, 0.50, 0.26)
+    static let qualityGood = SIMD3<Float>(0.48, 0.90, 0.45)
     static let qualityFair = SIMD3<Float>(0.98, 0.70, 0.15)
     static let qualityPoor = SIMD3<Float>(0.95, 0.24, 0.20)
 
-    private func qualityColor(count: UInt16, near: UInt16) -> SIMD3<Float> {
+    private func qualityColor(count: UInt16, near: UInt16, close: UInt16, diverse: Bool) -> SIMD3<Float> {
+        if close >= 8 && diverse { return Self.qualityExcellent }
         if near >= 8 { return Self.qualityGood }
         if count >= 4 { return Self.qualityFair }
         return Self.qualityPoor
@@ -765,15 +800,17 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let inv = 1.0 / activeVoxel
         let half: Int64 = 1 << 20
         let bx = Int64((p.x * inv).rounded(.down)), by = Int64((p.y * inv).rounded(.down)), bz = Int64((p.z * inv).rounded(.down))
-        var bestCount: UInt16 = 0, bestNear: UInt16 = 0
+        var bestCount: UInt16 = 0, bestNear: UInt16 = 0, bestClose: UInt16 = 0, anyDiverse = false
         for (dx, dy, dz) in [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
             let key = ((bx + Int64(dx) + half) << 42) | ((by + Int64(dy) + half) << 21) | (bz + Int64(dz) + half)
             if let i = keyToIndex[key] {
                 bestCount = max(bestCount, counts[Int(i)])
                 bestNear = max(bestNear, nearCounts[Int(i)])
+                bestClose = max(bestClose, closeCounts[Int(i)])
+                anyDiverse = anyDiverse || diverse[Int(i)]
             }
         }
-        return qualityColor(count: bestCount, near: bestNear)
+        return qualityColor(count: bestCount, near: bestNear, close: bestClose, diverse: anyDiverse)
     }
 
     /// Construye la geometría de puntos. En modo cobertura se incluyen también los puntos
@@ -795,7 +832,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 let k = Float(cnt)
                 verts.append(sums[i] / k)
                 if mode == .coverage {
-                    cols.append(qualityColor(count: cnt, near: nearCounts[i]))
+                    cols.append(qualityColor(count: cnt, near: nearCounts[i], close: closeCounts[i], diverse: diverse[i]))
                 } else {
                     cols.append(colorSums[i] / (k * 255))
                 }

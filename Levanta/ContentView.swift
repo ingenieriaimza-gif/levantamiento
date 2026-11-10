@@ -437,8 +437,9 @@ struct ScansView: View {
 
 struct QualityLegend: View {
     var body: some View {
-        HStack(spacing: 12) {
-            item(ScanEngine.qualityGood, "Bien (de cerca)")
+        HStack(spacing: 10) {
+            item(ScanEngine.qualityExcellent, "Excelente")
+            item(ScanEngine.qualityGood, "Bien")
             item(ScanEngine.qualityFair, "Acércate")
             item(ScanEngine.qualityPoor, "Falta")
         }
