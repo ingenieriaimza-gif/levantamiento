@@ -64,7 +64,7 @@ def _shelf_pack(sizes, page):
 
 def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
                  page_size=4096, zbuf_scale=2, smooth_iters=6, to_z_up=None, scale=1.0,
-                 harmonize=True, texture_scale=1.0):
+                 harmonize=True, texture_scale=1.0, consume=False):
     """
     mesh: TriangleMesh de Open3D en el mundo de ARKit (Y arriba, metros).
     frames: lista de cuadros (dicts con jpg, fx, fy, cx, cy, w, h, T) como en procesar_rgbd.
@@ -72,7 +72,9 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     """
     t0 = time.time()
     _avance(0.0, "Simplificando la malla para las fotos")
-    m = o3d.geometry.TriangleMesh(mesh)
+    # consume=True: la malla es solo para esto y se puede soltar (ahorra memoria con mallas grandes)
+    m = mesh if consume else o3d.geometry.TriangleMesh(mesh)
+    del mesh
     if len(m.triangles) > target_triangles:
         m = m.simplify_quadric_decimation(target_triangles)
     m.remove_degenerate_triangles()
@@ -208,10 +210,9 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     if harmonize:
         gains = _harmonize_gains(frames, C, labels, second_frame, K)
 
-    # --- UV en la foto elegida y recorte por foto
+    # --- UV de cada triángulo en su foto
     used = np.unique(labels[labels >= 0])
     corner_uv = np.zeros((nF, 3, 2))
-    crops = {}
     for k in used:
         fr = frames[k]
         fx, fy, cx, cy = fr["fx"], fr["fy"], fr["cx"], fr["cy"]
@@ -219,53 +220,89 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         R, t = Tc[:3, :3], Tc[:3, 3]
         sel = np.nonzero(labels == k)[0]
         Pv = (V[F[sel]].reshape(-1, 3) - t) @ R
-        uv = np.stack([fx * Pv[:, 0] / Pv[:, 2] + cx, fy * Pv[:, 1] / Pv[:, 2] + cy], 1).reshape(-1, 3, 2)
-        corner_uv[sel] = uv
-        lo = np.floor(uv.reshape(-1, 2).min(0)).astype(int) - 4
-        hi = np.ceil(uv.reshape(-1, 2).max(0)).astype(int) + 4
-        lo = np.maximum(lo, 0)
-        hi = np.minimum(hi, [int(fr["w"]) - 1, int(fr["h"]) - 1])
-        crops[k] = (lo, hi)
+        corner_uv[sel] = np.stack([fx * Pv[:, 0] / Pv[:, 2] + cx, fy * Pv[:, 1] / Pv[:, 2] + cy], 1).reshape(-1, 3, 2)
 
-    # parche gris para triángulos sin foto
+    # --- parches: grupos de triángulos vecinos que usan la misma foto. Solo se copia a la textura
+    # el pedazo de foto que cada parche usa (no la foto entera): menos memoria y carga más rápida.
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    a, b = adj[:, 0], adj[:, 1]
+    same = (labels[a] == labels[b]) & (labels[a] >= 0)
+    G = coo_matrix((np.ones(int(same.sum()), bool), (a[same], b[same])), shape=(nF, nF))
+    _, comp = connected_components(G, directed=False)
+    lab_faces = np.nonzero(labels >= 0)[0]
+    _, chart_of = np.unique(comp[lab_faces], return_inverse=True)      # parche de cada cara con foto
+    nC = int(chart_of.max()) + 1 if len(lab_faces) else 0
+    PAD = 3
+    cmin = np.full((nC, 2), np.inf)
+    cmax = np.full((nC, 2), -np.inf)
+    uvf = corner_uv[lab_faces]
+    np.minimum.at(cmin, chart_of, uvf.min(1))
+    np.maximum.at(cmax, chart_of, uvf.max(1))
+    chart_label = np.zeros(nC, np.int32)
+    chart_label[chart_of] = labels[lab_faces]
+    wh = np.array([[int(frames[k]["w"]), int(frames[k]["h"])] for k in range(K)])
+    lo = np.maximum(np.floor(cmin).astype(int) - PAD, 0)
+    hi = np.minimum(np.ceil(cmax).astype(int) + PAD, wh[chart_label] - 1)
     ts = float(texture_scale)
-    sizes = [(max(1, int(round((crops[k][1][0] - crops[k][0][0] + 1) * ts))),
-              max(1, int(round((crops[k][1][1] - crops[k][0][1] + 1) * ts)))) for k in used]
-    sizes.append((8, 8))
-    place, n_pages = _shelf_pack(sizes, page_size)
-    pages = [np.full((page_size, page_size, 3), 128, np.uint8) for _ in range(n_pages)]
+    csize = np.maximum(1, np.round((hi - lo + 1) * ts).astype(int))
+    place, n_pages = _shelf_pack([tuple(x) for x in csize.tolist()], page_size)
+    place = np.array(place, int).reshape(-1, 3)
+
+    # triángulos sin foto: cada uno recibe un cuadrito con su propio color (del LiDAR), no un gris único
+    none = np.nonzero(labels < 0)[0]
+    CELL = 4
+    cols_pp = page_size // CELL
+    per_page = cols_pp * cols_pp
+    n_color_pages = int(math.ceil(len(none) / per_page)) if len(none) else 0
+    pages = [np.full((page_size, page_size, 3), 128, np.uint8) for _ in range(n_pages + n_color_pages)]
     page_of = np.zeros(nF, np.int32)
     face_uv = np.zeros((nF, 3, 2))
+
     _avance(0.66, "Armando la textura con las fotos")
+    order = np.argsort(chart_label, kind="stable")
+    bounds = np.searchsorted(chart_label[order], np.arange(K + 1))
     for j, k in enumerate(used):
         if j % 10 == 0:
             _avance(0.66 + 0.09 * j / max(1, len(used)), "Armando la textura con las fotos")
-        (lo, hi), (pg, px, py) = crops[k], place[j]
         img = cv2.imread(frames[k]["jpg"], cv2.IMREAD_COLOR)
-        crop = img[lo[1]:hi[1] + 1, lo[0]:hi[0] + 1]
         if harmonize:
-            crop = np.clip(crop.astype(np.float32) * gains[k][::-1], 0, 255).astype(np.uint8)
-        if ts != 1.0:
-            crop = cv2.resize(crop, sizes[j], interpolation=cv2.INTER_AREA)
-        pages[pg][py:py + crop.shape[0], px:px + crop.shape[1]] = crop
-        sel = labels == k
-        # coordenada de píxel (centro) -> UV de la página
-        cu = (corner_uv[sel][..., 0] - lo[0] + 0.5) * ts + px
-        cv_ = (corner_uv[sel][..., 1] - lo[1] + 0.5) * ts + py
-        face_uv[sel] = np.stack([cu / page_size, 1.0 - cv_ / page_size], -1)
-        page_of[sel] = pg
-    gpg, gx, gy = place[-1]
-    none = labels < 0
-    face_uv[none] = [(gx + 4) / page_size, 1.0 - (gy + 4) / page_size]
-    page_of[none] = gpg
-    if none.any():
-        gray = (np.clip(VC[F[none]].mean((0, 1)), 0, 1) * 255).astype(np.uint8)[::-1]
-        pages[gpg][gy:gy + 8, gx:gx + 8] = gray
+            img = np.clip(img.astype(np.float32) * gains[k][::-1], 0, 255).astype(np.uint8)
+        for c in order[bounds[k]:bounds[k + 1]]:
+            crop = img[lo[c, 1]:hi[c, 1] + 1, lo[c, 0]:hi[c, 0] + 1]
+            if ts != 1.0:
+                crop = cv2.resize(crop, (int(csize[c, 0]), int(csize[c, 1])), interpolation=cv2.INTER_AREA)
+            pg, px, py = place[c]
+            pages[pg][py:py + crop.shape[0], px:px + crop.shape[1]] = crop
+    if nC:
+        lo_f, pl_f = lo[chart_of], place[chart_of]
+        cu = (uvf[..., 0] - lo_f[:, None, 0] + 0.5) * ts + pl_f[:, None, 1]
+        cv_ = (uvf[..., 1] - lo_f[:, None, 1] + 0.5) * ts + pl_f[:, None, 2]
+        face_uv[lab_faces] = np.stack([cu / page_size, 1.0 - cv_ / page_size], -1)
+        page_of[lab_faces] = pl_f[:, 0]
+    if len(none):
+        col = (np.clip(VC[F[none]].mean(1), 0, 1) * 255).astype(np.uint8)[:, ::-1]      # BGR
+        n = np.arange(len(none))
+        pg = n_pages + n // per_page
+        gx = (n % per_page) % cols_pp
+        gy = (n % per_page) // cols_pp
+        for q in range(n_color_pages):
+            m = pg == n_pages + q
+            cell = np.full((cols_pp, cols_pp, 3), 128, np.uint8)
+            cell[gy[m], gx[m]] = col[m]
+            pages[n_pages + q][:] = np.repeat(np.repeat(cell, CELL, 0), CELL, 1)
+        cuv = np.stack([(gx * CELL + CELL / 2) / page_size, 1.0 - (gy * CELL + CELL / 2) / page_size], -1)
+        face_uv[none] = cuv[:, None, :]
+        page_of[none] = pg
+    n_photo_pages = n_pages
+    n_pages = len(pages)
+    # recortar la última página de color a lo usado no hace falta: JPEG la comprime casi a nada
 
     os.makedirs(out_dir, exist_ok=True)
     _avance(0.75, "Guardando el modelo con fotos")
     _export(V * scale, F, face_uv, page_of, pages, out_dir, to_z_up)
-    _log(f"  {len(used)} fotos usadas, {n_pages} página(s) de textura {page_size}², {time.time() - t0:.0f} s")
+    _log(f"  {len(used)} fotos usadas en {nC:,} parches, {n_photo_pages} página(s) de fotos + "
+         f"{n_color_pages} de color, {page_size}², {time.time() - t0:.0f} s")
     return {"triangles": nF, "photos_used": int(len(used)), "pages": n_pages,
             "coverage": float((labels >= 0).mean())}
 

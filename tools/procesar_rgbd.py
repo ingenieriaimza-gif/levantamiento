@@ -55,8 +55,8 @@ def progreso(frac, etapa):
 
 # avance total de este script (el programa de la PC deja el 4 % final para el Gaussian Splatting)
 # (pesos medidos en una corrida real: la malla y el modelo con fotos son lo más tardado)
-ETAPAS = {"carga": (0.00, 0.01), "nitidez": (0.01, 0.03), "fusion": (0.03, 0.12), "malla": (0.12, 0.25),
-          "fotos": (0.25, 0.89), "exportar": (0.89, 1.00)}
+ETAPAS = {"carga": (0.00, 0.01), "nitidez": (0.01, 0.03), "fusion": (0.03, 0.10), "malla": (0.10, 0.20),
+          "completo": (0.20, 0.32), "fotos": (0.32, 0.90), "exportar": (0.90, 1.00)}
 
 
 def avance(etapa, f, texto):
@@ -163,7 +163,8 @@ def quitar_rasantes(depth_mm, fx, max_tan=2.5):
     return out
 
 
-def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_width=768):
+def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_width=768, etapa="fusion",
+         max_tan=None):
     """ia: RefinadorIA opcional; si se da, cada cuadro se refina a ia_width de ancho antes de fusionarse."""
     dw, dh = int(meta["depthWidth"]), int(meta["depthHeight"])
     ia_aporte = []
@@ -175,7 +176,7 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
         sh = []
         for i, fr in enumerate(frames):
             sh.append(sharpness(fr["jpg"]))
-            if i % 20 == 0:
+            if i % 20 == 0 and etapa == "fusion":
                 avance("nitidez", i / len(frames), "Revisando fotos movidas")
         sh = np.array(sh)
         thr = 0.45 * np.median(sh)
@@ -220,7 +221,7 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
             from ia_profundidad import refinar_cuadro
             depth, frac = refinar_cuadro(ia, rgb_full, depth, conf, (ow, oh))
             ia_aporte.append(frac)
-            depth = quitar_rasantes(depth, fr["fx"] * ow / float(fr.get("w", iw)), max_tan=RASANTE_TAN)
+            depth = quitar_rasantes(depth, fr["fx"] * ow / float(fr.get("w", iw)), max_tan=max_tan or RASANTE_TAN)
         color = cv2.cvtColor(cv2.resize(color_full, (ow, oh), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
 
         sx, sy = ow / float(fr.get("w", iw)), oh / float(fr.get("h", ih))
@@ -238,7 +239,9 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
         vbg.integrate(coords, dimg, cimg, Kt, Et, 1000.0, dmax, trunc_voxel_multiplier=trunc_mult)
         n_ok += 1
         if n % 5 == 0:
-            avance("fusion", (n + 1) / len(used), f"Uniendo cuadros {n + 1} de {len(used)}")
+            avance(etapa, 0.85 * (n + 1) / len(used),
+                   f"Uniendo cuadros {n + 1} de {len(used)}" if etapa == "fusion"
+                   else f"Completando zonas difíciles ({n + 1} de {len(used)})")
         if (n + 1) % 50 == 0:
             log(f"  {n + 1}/{len(used)} cuadros fusionados ({time.time() - t0:.0f} s)")
     if ia_aporte:
@@ -288,6 +291,23 @@ def acabado(mesh):
     return mesh
 
 
+def solo_lo_nuevo(completa, exacta, cerca=0.010, min_triangles=60):
+    """De la malla completa (confianza media) deja solo lo que la malla exacta no tiene: los triángulos
+    con algún vértice a más de `cerca` de la exacta. Así, donde hay datos de alta confianza el modelo
+    con fotos usa la geometría exacta (para medir), y lo demás solo rellena."""
+    if len(exacta.triangles) == 0:
+        return completa
+    sc = o3d.t.geometry.RaycastingScene()
+    sc.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(exacta))
+    d = sc.compute_distance(o3d.core.Tensor(np.asarray(completa.vertices).astype(np.float32))).numpy()
+    F = np.asarray(completa.triangles)
+    keep = (d[F] > cerca).any(1)
+    out = o3d.geometry.TriangleMesh(completa)
+    out.remove_triangles_by_mask(~keep)
+    out.remove_unreferenced_vertices()
+    return clean_mesh(out, min_triangles=min_triangles) if len(out.triangles) else out
+
+
 # ---------------------------------------------------------------- exportación
 
 def write_e57(path, pts, cols):
@@ -320,6 +340,8 @@ def main():
                     help="calibración: distancia real y la misma distancia medida en la nube (m)")
     ap.add_argument("--max-triangulos-stl", type=int, default=800_000)
     ap.add_argument("--sin-textura", action="store_true", help="no generar el modelo con fotos")
+    ap.add_argument("--sin-completo", action="store_true",
+                    help="modelo con fotos sobre la malla exacta (sin completar zonas de confianza media)")
     ap.add_argument("--ia", action="store_true", help="refinar la profundidad con IA (Prompt Depth Anything)")
     ap.add_argument("--ia-ancho", type=int, default=768, help="ancho de la profundidad refinada por IA")
     ap.add_argument("--triangulos-textura", type=int, default=700_000)
@@ -371,9 +393,38 @@ def main():
             import texturizar
             from texturizar import texture_mesh
             texturizar.AVANCE = lambda f, t: avance("fotos", f, t)
-            avance("fotos", 0, "Preparando las fotos")
             kf = [f for f in frames if f.get("kf", True)] or frames     # fotos clave (las más nítidas)
-            tex_info = texture_mesh(mesh, kf, args.salida, dmax=args.dmax,
+            # Modelo con fotos "completo": se vuelve a unir todo aceptando también lecturas de confianza
+            # media, ángulos más inclinados y hasta 5 m. Cubre piso, objetos oscuros y lo lejano que la
+            # malla exacta descarta (en un escaneo real: 67 % -> 89 % de lo que se ve en las fotos).
+            # Donde la malla exacta tiene datos se conserva tal cual; lo nuevo solo rellena lo que falta.
+            tex_mesh, tex_dmax = mesh, args.dmax
+            if not args.sin_completo:
+                try:
+                    v2 = max(args.voxel, 0.006)
+                    vbg2, _, _ = fuse(meta, frames, v2, 5.0 * v2, max(args.dmax, 5.0), 1,
+                                      not args.sin_filtro_borrosas, etapa="completo", max_tan=5.0)
+                    m2, _ = extract(vbg2, args.lecturas)
+                    del vbg2
+                    gc.collect()
+                    avance("completo", 0.9, "Limpiando el modelo completo")
+                    m2 = acabado(clean_mesh(m2, min_triangles=400))
+                    extra = solo_lo_nuevo(m2, mesh)
+                    del m2
+                    if len(extra.triangles) > 0:
+                        tex_mesh = o3d.geometry.TriangleMesh(mesh)
+                        tex_mesh += extra
+                        tex_mesh.compute_vertex_normals()
+                        tex_dmax = max(args.dmax, 5.0)
+                        log(f"Modelo completo para las fotos: malla exacta + {len(extra.triangles):,} "
+                            f"triángulos de zonas difíciles")
+                except Exception as e:      # noqa: BLE001 — si no alcanza la memoria, se usa la malla exacta
+                    log(f"  (modelo completo omitido: {e})")
+            avance("fotos", 0, "Preparando las fotos")
+            holder, hibrida = [tex_mesh], tex_mesh is not mesh
+            del tex_mesh
+            gc.collect()
+            tex_info = texture_mesh(holder.pop(), kf, args.salida, dmax=tex_dmax, consume=hibrida,
                                     target_triangles=args.triangulos_textura,
                                     page_size=args.pagina_textura,
                                     texture_scale=args.escala_textura,
@@ -425,6 +476,9 @@ def main():
             f"Malla: {len(mesh.triangles):,} triángulos (STL: {len(stl.triangles):,})",
             f"Extensión (X × Y × Z): {hi[0] - lo[0]:.3f} × {hi[1] - lo[1]:.3f} × {hi[2] - lo[2]:.3f} m",
             "Sistema: Z hacia arriba; STL y OBJ en milímetros (nube en metros). Origen: donde arrancó el escaneo.",
+            "Para medir e interferencias exactas: malla_solidworks.stl (solo lecturas de alta confianza).",
+            "El modelo con fotos usa esa misma malla exacta y además rellena zonas de confianza media",
+            "(piso, objetos oscuros, lo lejano); en esas zonas rellenadas la medida puede variar unos mm.",
         ]
         if tex_info:
             rep.append(f"Modelo con fotos: {tex_info['triangles']:,} triángulos, {tex_info['photos_used']} fotos, "
