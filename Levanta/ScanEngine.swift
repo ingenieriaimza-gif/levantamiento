@@ -159,8 +159,16 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var tintLiveMesh = true
 
     private let maxVoxels = 7_000_000
-    /// Ya se limpió y sigue lleno: la vista previa deja de crecer (las fotos para la PC siguen).
-    private var cloudFull = false
+    private var phoneFullWarned = false
+    /// Lo ya escaneado lejos de ti se guarda resumido (un punto cada 2 cm) para que la vista nunca se llene.
+    private let archiveVoxel: Float = 0.02
+    private var archiveKey: [Int64: Int32] = [:]
+    private var archSums: [SIMD3<Float>] = []
+    private var archColors: [SIMD3<Float>] = []
+    private var archCounts: [UInt32] = []
+    private var archQuality: [UInt8] = []     // 0 mala · 1 regular · 2 buena · 3 excelente
+    private var archivedPoints = 0            // puntos de 5 mm que se resumieron (para el contador)
+    private let maxArchive = 25_000_000
     private let processInterval: TimeInterval = 0.09   // ~11 cuadros por segundo
     private let pixelStep = 1                           // todos los píxeles del mapa de profundidad
 
@@ -337,7 +345,13 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             self.firstDir.removeAll(keepingCapacity: false)
             self.diverse.removeAll(keepingCapacity: false)
             self.carveCursor = 0
-            self.cloudFull = false
+            self.archiveKey.removeAll(keepingCapacity: false)
+            self.archSums.removeAll(keepingCapacity: false)
+            self.archColors.removeAll(keepingCapacity: false)
+            self.archCounts.removeAll(keepingCapacity: false)
+            self.archQuality.removeAll(keepingCapacity: false)
+            self.archivedPoints = 0
+            self.phoneFullWarned = false
             self.removedTotal = 0
             DispatchQueue.main.async { self.removedPoints = 0 }
             self.activeVoxel = voxel
@@ -386,8 +400,17 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         if activeRecordRGBD && recorder.isActive, let depth = chosen,
            recorder.consider(frame: frame, depth: depth, mask: mask, dense: nearFocus) {
             savedKeyframe = true
-            let n = recorder.count
+            let n = recorder.selected
             DispatchQueue.main.async { self.keyframeCount = n }
+            if recorder.phoneFull && !phoneFullWarned {
+                phoneFullWarned = true
+                let pc = link.isConnected
+                DispatchQueue.main.async {
+                    self.statusMessage = pc
+                        ? "El iPhone se quedó sin espacio: las fotos nuevas se siguen guardando en la PC."
+                        : "El iPhone se quedó sin espacio y no hay PC conectada: conéctala para seguir guardando fotos."
+                }
+            }
         }
         if link.isConnected, let depth = chosen,
            savedKeyframe || frame.timestamp - lastStreamTime >= 0.25 {
@@ -601,14 +624,14 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let half: Int64 = 1 << 20
         let limit: Float = Float(half - 2)
 
-        if sums.count >= maxVoxels && !cloudFull {
-            // lleno: se quitan los puntos de una sola lectura (ruido o muy lejos) para seguir agregando
+        if sums.count >= maxVoxels {
+            // lleno: primero se quita el ruido (una sola lectura); si no alcanza, lo que quedó lejos de ti
+            // se resume a 2 cm. Así la vista nunca se detiene; el modelo exacto lo hace la PC con las fotos.
             pruneWeak()
-            if sums.count > maxVoxels * 85 / 100 {
-                cloudFull = true
-                DispatchQueue.main.async {
-                    self.statusMessage = "La vista del iPhone llegó a su límite de puntos. El escaneo sigue grabando todo para la PC; para ver más aquí, guarda y empieza otro escaneo."
-                }
+            var radius: Float = 4
+            while sums.count > maxVoxels * 75 / 100 && radius >= 0.75 {
+                archiveFar(from: camPos, radius: radius)
+                radius *= 0.6
             }
         }
         if sums.count >= maxVoxels {
@@ -762,6 +785,50 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         carveCursor = 0
     }
 
+    /// Pasa los puntos a más de `radius` de la cámara al resumen de 2 cm.
+    private func archiveFar(from cam: SIMD3<Float>, radius: Float) {
+        let n = sums.count
+        let inv = 1 / archiveVoxel
+        let half: Int64 = 1 << 20
+        let r2 = radius * radius
+        var w = 0
+        for i in 0..<n {
+            let c = counts[i]
+            let p = sums[i] / Float(c)
+            if simd_distance_squared(p, cam) > r2 && archSums.count < maxArchive {
+                let key = ((Int64((p.x * inv).rounded(.down)) + half) << 42) |
+                          ((Int64((p.y * inv).rounded(.down)) + half) << 21) |
+                          (Int64((p.z * inv).rounded(.down)) + half)
+                let q: UInt8 = (closeCounts[i] >= 8 && diverse[i]) ? 3 : nearCounts[i] >= 8 ? 2 : c >= 4 ? 1 : 0
+                if let a = archiveKey[key] {
+                    let j = Int(a)
+                    archSums[j] += sums[i]; archColors[j] += colorSums[i]; archCounts[j] += UInt32(c)
+                    archQuality[j] = max(archQuality[j], q)
+                } else {
+                    archiveKey[key] = Int32(archSums.count)
+                    archSums.append(sums[i]); archColors.append(colorSums[i])
+                    archCounts.append(UInt32(c)); archQuality.append(q)
+                }
+                archivedPoints += 1
+                continue
+            }
+            if w != i {
+                sums[w] = sums[i]; colorSums[w] = colorSums[i]; counts[w] = counts[i]
+                keys[w] = keys[i]; misses[w] = misses[i]; nearCounts[w] = nearCounts[i]
+                closeCounts[w] = closeCounts[i]; firstDir[w] = firstDir[i]; diverse[w] = diverse[i]
+            }
+            w += 1
+        }
+        let drop = n - w
+        guard drop > 0 else { return }
+        sums.removeLast(drop); colorSums.removeLast(drop); counts.removeLast(drop)
+        keys.removeLast(drop); misses.removeLast(drop); nearCounts.removeLast(drop)
+        closeCounts.removeLast(drop); firstDir.removeLast(drop); diverse.removeLast(drop)
+        keyToIndex.removeAll(keepingCapacity: true)
+        for i in 0..<w { keyToIndex[keys[i]] = Int32(i) }
+        carveCursor = 0
+    }
+
     // MARK: Limpieza: borrar lo que el LiDAR ve a través
 
     /// Revisa una parte de los puntos (unos 600 mil por cuadro, en rotación) contra la vista actual.
@@ -863,7 +930,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let mode = colorMode
         queue.async {
             let minObs = self.activeMinObs
-            let total = self.counts.reduce(0) { $0 + ($1 >= minObs ? 1 : 0) }
+            let total = self.counts.reduce(0) { $0 + ($1 >= minObs ? 1 : 0) } + self.archivedPoints
             let geometry = show ? self.buildGeometry(mode: mode, maxPoints: 900_000,
                                                      pointSize: 3, maxRadius: 3) : nil
             DispatchQueue.main.async {
@@ -900,6 +967,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             let c = counts[i]
             if c >= minObs { out.append(sums[i] / Float(c)) }
             i += step
+        }
+        for j in Swift.stride(from: 0, to: archSums.count, by: step) {
+            out.append(archSums[j] / Float(archCounts[j]))
         }
         return out
     }
@@ -1005,6 +1075,16 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             }
             i += step
         }
+        // lo resumido (lejos de ti, un punto cada 2 cm)
+        if !archSums.isEmpty {
+            let aStep = max(1, archSums.count / max(1, maxPoints / 3))
+            let qcol = [Self.qualityPoor, Self.qualityFair, Self.qualityGood, Self.qualityExcellent]
+            for j in Swift.stride(from: 0, to: archSums.count, by: aStep) {
+                let k = Float(archCounts[j])
+                verts.append(archSums[j] / k)
+                cols.append(mode == .coverage ? qcol[Int(archQuality[j])] : archColors[j] / (k * 255))
+            }
+        }
         // puntos finos (2 mm) de las piezas enfocadas: todos, sin saltar
         let fineMin: UInt16 = mode == .coverage ? 1 : 2
         for j in 0..<fineSums.count where fineCounts[j] >= fineMin {
@@ -1098,7 +1178,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             keep.reserveCapacity(self.counts.count)
             for (i, c) in self.counts.enumerated() where c >= minObs { keep.append(i) }
 
-            guard !keep.isEmpty else {
+            let nArch = self.archSums.count
+            guard !keep.isEmpty || nArch > 0 else {
                 DispatchQueue.main.async {
                     completion(.failure(NSError(domain: "Levanta", code: 1,
                         userInfo: [NSLocalizedDescriptionKey: "No hay puntos para guardar."])))
@@ -1110,7 +1191,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             ply
             format binary_little_endian 1.0
             comment Levanta LiDAR scan, units meters, Y up
-            element vertex \(keep.count)
+            element vertex \(keep.count + nArch)
             property float x
             property float y
             property float z
@@ -1121,7 +1202,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
 
             """
             var data = Data(header.utf8)
-            var body = [UInt8](repeating: 0, count: keep.count * 15)
+            var body = [UInt8](repeating: 0, count: (keep.count + nArch) * 15)
             var o = 0
             @inline(__always) func putFloat(_ f: Float) {
                 let b = f.bitPattern
@@ -1135,6 +1216,16 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 let k = Float(self.counts[i])
                 let p = self.sums[i] / k
                 let c = self.colorSums[i] / k
+                putFloat(p.x); putFloat(p.y); putFloat(p.z)
+                body[o] = UInt8(min(255, max(0, c.x.rounded())))
+                body[o + 1] = UInt8(min(255, max(0, c.y.rounded())))
+                body[o + 2] = UInt8(min(255, max(0, c.z.rounded())))
+                o += 3
+            }
+            for j in 0..<nArch {          // lo resumido a 2 cm
+                let k = Float(self.archCounts[j])
+                let p = self.archSums[j] / k
+                let c = self.archColors[j] / k
                 putFloat(p.x); putFloat(p.y); putFloat(p.z)
                 body[o] = UInt8(min(255, max(0, c.x.rounded())))
                 body[o + 1] = UInt8(min(255, max(0, c.y.rounded())))

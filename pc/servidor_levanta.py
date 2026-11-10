@@ -30,6 +30,7 @@ import struct
 import subprocess
 import sys
 import threading
+import shutil
 import time
 from datetime import datetime
 
@@ -207,6 +208,34 @@ class Server:
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)   # fusión: un hilo
         self.status = {"cuadros": 0, "clave": 0, "mensaje": "Esperando al iPhone", "procesando": False,
                        "resultados": []}
+        self.disco_lleno = False
+        self._bytes_cuadros = 0
+        self._n_cuadros = 0
+        self._t_primero = None
+        self.revisar_disco(forzar=True)
+
+    # Sin tope de cuadros: el límite es el espacio libre del disco. Se dejan 3 GB para crear los modelos.
+    RESERVA_DISCO = 3 * 1024 ** 3
+
+    def revisar_disco(self, forzar=False):
+        """Actualiza en el estado el espacio libre y cuánto tiempo de escaneo cabe. Devuelve True si hay lugar."""
+        if not forzar and self._n_cuadros % 25:
+            return not self.disco_lleno
+        try:
+            libre = shutil.disk_usage(self.root).free
+        except OSError:
+            return True
+        self.status["libre_gb"] = round(libre / 1024 ** 3, 1)
+        # ritmo real de este escaneo (bytes por segundo); si aún no hay, ~1.8 MB/s (4 cuadros/s)
+        ritmo = 1.8e6
+        if self._t_primero and self._n_cuadros > 20:
+            dt = max(1.0, time.time() - self._t_primero)
+            ritmo = max(2e5, self._bytes_cuadros / dt)
+        self.status["libre_horas"] = round(max(0, libre - self.RESERVA_DISCO) / ritmo / 3600, 1)
+        lleno = libre < self.RESERVA_DISCO
+        self.status["disco_lleno"] = lleno
+        self.disco_lleno = lleno
+        return not lleno
 
     async def broadcast(self, data, phone=True):
         targets = list(self.viewers) + ([self.phone] if phone and self.phone is not None else [])
@@ -245,6 +274,8 @@ class Server:
                                                {"device": h.get("dispositivo", "iPhone"),
                                                 "system": h.get("sistema", "")}, refiner=refiner)
                         self.status.update(cuadros=0, clave=0)
+                        self._n_cuadros, self._bytes_cuadros, self._t_primero = 0, 0, None
+                        self.revisar_disco(forzar=True)
                         if getattr(self, "zones", None):      # piezas marcadas antes de empezar a grabar
                             with open(os.path.join(self.session.dir, "zonas.json"), "w", encoding="utf-8") as f:
                                 json.dump({"zonas": self.zones}, f)
@@ -256,6 +287,18 @@ class Server:
                     jpeg = bytes(data[:nj])
                     depth = bytes(data[nj:nj + nd])
                     conf = bytes(data[nj + nd:nj + nd + nc])
+                    self._n_cuadros += 1
+                    self._bytes_cuadros += nj + nd + nc
+                    if self._t_primero is None:
+                        self._t_primero = time.time()
+                    antes = self.disco_lleno
+                    if not self.revisar_disco():
+                        if not antes:
+                            await self.send_status("Disco de la PC casi lleno: ya no se guardan cuadros. "
+                                                   "Libera espacio o termina el escaneo.")
+                        continue
+                    if antes:
+                        await self.send_status("Hay espacio de nuevo en la PC: se siguen guardando los cuadros")
                     await loop.run_in_executor(self.pool, self.session.add_frame, h, jpeg, depth, conf)
                     self.status["cuadros"] = self.session.frames
                     self.status["clave"] = self.session.keyframes

@@ -37,7 +37,12 @@ final class KeyframeRecorder {
     let minTranslation: Float = 0.07      // m
     let minRotation: Float = 6 * .pi / 180
     let minInterval: TimeInterval = 0.25
-    let maxFrames = 1200
+    /// Sin tope de fotos: se guardan mientras el iPhone tenga más de 1.5 GB libres. Si se llena,
+    /// las fotos se siguen eligiendo y mandando a la PC (que es donde se procesan), solo no se guardan aquí.
+    let minFreeBytes: Int64 = 1_500_000_000
+    private(set) var phoneFull = false
+    /// Fotos clave elegidas (guardadas aquí o solo mandadas a la PC).
+    private(set) var selected = 0
 
     // MARK: Sesión
 
@@ -53,6 +58,8 @@ final class KeyframeRecorder {
         jsonl = try FileHandle(forWritingTo: jsonURL)
         directory = dir
         count = 0
+        selected = 0
+        phoneFull = Self.freeBytes() < minFreeBytes
         lastPose = nil
         lastTime = 0
         waitingSince = nil
@@ -107,7 +114,7 @@ final class KeyframeRecorder {
     /// Se llama en la cola de escaneo. Devuelve true si se guardó.
     @discardableResult
     func consider(frame: ARFrame, depth: ARDepthData, mask: [Bool]? = nil, dense: Bool = false) -> Bool {
-        guard directory != nil, count < maxFrames else { return false }
+        guard directory != nil else { return false }
         // dense = cerca de una pieza enfocada: fotos cada 3 cm o 3° (en lugar de 7 cm o 6°)
         let minT = dense ? Float(0.03) : minTranslation
         let minR = dense ? Float(3 * Float.pi / 180) : minRotation
@@ -197,6 +204,12 @@ final class KeyframeRecorder {
         ]
         guard let lineData = try? JSONSerialization.data(withJSONObject: line) else { return false }
 
+        selected += 1
+        lastPose = T
+        lastTime = frame.timestamp
+        if selected % 20 == 0 && !phoneFull { phoneFull = Self.freeBytes() < minFreeBytes }
+        if phoneFull { return true }      // elegida (va a la PC), pero sin espacio para guardarla aquí
+
         let index = count
         let name = String(format: "%06d", index)
         guard let framesDir = directory?.appendingPathComponent("frames") else { return false }
@@ -211,9 +224,13 @@ final class KeyframeRecorder {
         }
 
         count += 1
-        lastPose = T
-        lastTime = frame.timestamp
         return true
+    }
+
+    static func freeBytes() -> Int64 {
+        let url = URL(fileURLWithPath: NSHomeDirectory())
+        let v = try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return v?.volumeAvailableCapacityForImportantUsage ?? Int64.max
     }
 
     // MARK: Empaquetado para compartir

@@ -487,6 +487,7 @@ struct PCStatusPill: View {
     }
 
     private var icon: String {
+        if link.pcDiskFull { return "externaldrive.badge.exclamationmark" }
         switch link.state {
         case .connected: return "desktopcomputer"
         case .failed: return "exclamationmark.triangle.fill"
@@ -496,7 +497,12 @@ struct PCStatusPill: View {
 
     private var detail: String {
         var parts = ["PC: \(link.pcFrames) cuadros"]
-        if triangles > 0 { parts.append("superficie \(triangles / 1000) k triángulos") }
+        if link.pcDiskFull {
+            parts.append("DISCO LLENO")
+        } else if let gb = link.pcFreeGB {
+            let h = link.pcFreeHours ?? 0
+            parts.append(String(format: "%.0f GB libres", gb) + (h >= 1 ? String(format: " (~%.0f h)", h) : String(format: " (~%.0f min)", h * 60)))
+        }
         if link.pcProcessing { parts = [link.pcMessage] }
         return parts.joined(separator: " · ")
     }

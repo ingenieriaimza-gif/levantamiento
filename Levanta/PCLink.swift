@@ -27,6 +27,10 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     @Published private(set) var pcProcessing = false
     /// Avance de "crear el modelo 3D" en la PC (0–1), etapa y segundos restantes.
     @Published private(set) var pcProgress: Double?
+    /// Espacio libre en la PC y cuántas horas de escaneo caben ahí.
+    @Published private(set) var pcFreeGB: Double?
+    @Published private(set) var pcFreeHours: Double?
+    @Published private(set) var pcDiskFull = false
     @Published private(set) var pcStage = ""
     @Published private(set) var pcRemaining: Int?
     /// Versión de la app del iPhone guardada en la PC (0 si no hay).
@@ -224,7 +228,13 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
             let frac = (prog?["fraccion"] as? NSNumber)?.doubleValue
             let stage = prog?["etapa"] as? String ?? ""
             let rest = (prog?["restante_s"] as? NSNumber)?.intValue
+            let freeGB = (u.header["libre_gb"] as? NSNumber)?.doubleValue
+            let freeHours = (u.header["libre_horas"] as? NSNumber)?.doubleValue
+            let diskFull = (u.header["disco_lleno"] as? NSNumber)?.boolValue ?? false
             DispatchQueue.main.async {
+                self.pcFreeGB = freeGB
+                self.pcFreeHours = freeHours
+                self.pcDiskFull = diskFull
                 self.pcProgress = proc ? frac : nil
                 self.pcStage = stage
                 self.pcRemaining = rest
