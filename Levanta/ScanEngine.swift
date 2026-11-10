@@ -197,6 +197,12 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         liveMeshNode.renderingOrder = -1
         view.scene.rootNode.addChildNode(liveMeshNode)
         view.scene.rootNode.addChildNode(focus.root)
+        liveMesh.workQueue = queue
+        liveMesh.qualityColors = { [weak self] pts in
+            guard let self else { return [] }
+            // mismos colores que la nube: rojo/amarillo = falta, verde = listo
+            return pts.map { self.quality(at: $0) }
+        }
         liveMesh.attach(to: view)
         liveMesh.enabled = meshView
         pointsNode.isHidden = meshView

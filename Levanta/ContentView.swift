@@ -29,7 +29,7 @@ struct ContentView: View {
                     PCStatusPill(link: engine.link, triangles: engine.liveMeshTriangles)
                     AppUpdateBanner(link: engine.link)
                 }
-                if !engine.meshView && engine.colorMode == .coverage && (engine.isScanning || engine.pointCount > 0) {
+                if (engine.meshView || engine.colorMode == .coverage) && (engine.isScanning || engine.pointCount > 0) {
                     QualityLegend()
                 }
                 FocusBar(focus: engine.focus,
