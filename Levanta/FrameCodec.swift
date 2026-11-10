@@ -164,8 +164,23 @@ enum FrameCodec {
         return (kind, header, 5 + hl)
     }
 
+    /// Vértices de la malla en vivo que manda la PC (mundo ARKit, metros).
+    static func liveMeshVertices(_ data: Data) -> [SIMD3<Float>]? {
+        guard let u = unpack(data), u.kind == 10,
+              let nv = (u.header["nv"] as? NSNumber)?.intValue, nv > 0 else { return nil }
+        let b = data.startIndex + u.offset
+        guard data.count >= u.offset + nv * 12 else { return nil }
+        var out = [SIMD3<Float>](repeating: .zero, count: nv)
+        data.subdata(in: b..<(b + nv * 12)).withUnsafeBytes { (p: UnsafeRawBufferPointer) in
+            let f = p.bindMemory(to: Float.self)
+            for k in 0..<nv { out[k] = SIMD3<Float>(f[k * 3], f[k * 3 + 1], f[k * 3 + 2]) }
+        }
+        return out
+    }
+
     /// Geometría SceneKit de la malla en vivo que manda la PC.
-    static func liveMeshGeometry(_ data: Data, tint: Bool) -> SCNGeometry? {
+    /// tint = modo calidad: con `qualityColors` (3 Float por vértice) se pinta verde/amarillo/rojo.
+    static func liveMeshGeometry(_ data: Data, tint: Bool, qualityColors: Data? = nil) -> SCNGeometry? {
         guard let u = unpack(data), u.kind == 10,
               let nv = (u.header["nv"] as? NSNumber)?.intValue, let nt = (u.header["nt"] as? NSNumber)?.intValue,
               nv > 0, nt > 0 else { return nil }
@@ -180,7 +195,11 @@ enum FrameCodec {
                                         usesFloatComponents: true, componentsPerVector: 3,
                                         bytesPerComponent: 4, dataOffset: 0, dataStride: 12)
         var sources = [vSource]
-        if !tint {
+        if tint, let qualityColors, qualityColors.count == nv * 12 {
+            sources.append(SCNGeometrySource(data: qualityColors, semantic: .color, vectorCount: nv,
+                                             usesFloatComponents: true, componentsPerVector: 3,
+                                             bytesPerComponent: 4, dataOffset: 0, dataStride: 12))
+        } else if !tint {
             let raw = data.subdata(in: vEnd..<cEnd)
             var floats = [Float](repeating: 0, count: nv * 3)
             raw.withUnsafeBytes { (p: UnsafeRawBufferPointer) in
@@ -197,7 +216,10 @@ enum FrameCodec {
         let m = SCNMaterial()
         m.lightingModel = .constant
         m.isDoubleSided = true
-        if tint {
+        if tint && qualityColors != nil {
+            m.diffuse.contents = UIColor.white
+            m.transparency = 0.5
+        } else if tint {
             m.diffuse.contents = UIColor(red: 0.25, green: 0.85, blue: 0.45, alpha: 1)
             m.transparency = 0.45
         } else {

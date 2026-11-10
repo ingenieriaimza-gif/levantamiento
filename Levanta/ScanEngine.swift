@@ -91,6 +91,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var counts: [UInt16] = []
     private var keys: [Int64] = []          // llave de cada vóxel (para borrarlo del índice)
     private var misses: [UInt16] = []       // veces que el LiDAR vio a través del punto
+    private var nearCounts: [UInt16] = []   // lecturas tomadas de cerca (≤ 1.5 m): las de buena calidad
     private var activeCleanNoise = true
     private var carveCursor = 0
     private var removedTotal = 0
@@ -255,6 +256,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             self.counts.removeAll(keepingCapacity: false)
             self.keys.removeAll(keepingCapacity: false)
             self.misses.removeAll(keepingCapacity: false)
+            self.nearCounts.removeAll(keepingCapacity: false)
             self.carveCursor = 0
             self.removedTotal = 0
             DispatchQueue.main.async { self.removedPoints = 0 }
@@ -414,8 +416,19 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         lastLiveMesh = data
         lastLiveMeshTime = Date()
         let tint = tintLiveMesh
-        DispatchQueue.global(qos: .userInitiated).async {
-            let g = FrameCodec.liveMeshGeometry(data, tint: tint)
+        // en modo calidad, cada vértice de la superficie de la PC toma el color de calidad
+        // según las lecturas que el iPhone tiene en ese lugar
+        (tint ? queue : DispatchQueue.global(qos: .userInitiated)).async {
+            var q: Data?
+            if tint, let verts = FrameCodec.liveMeshVertices(data) {
+                var cols = [Float](repeating: 0, count: verts.count * 3)
+                for (k, v) in verts.enumerated() {
+                    let c = self.quality(at: v)
+                    cols[k * 3] = c.x; cols[k * 3 + 1] = c.y; cols[k * 3 + 2] = c.z
+                }
+                q = cols.withUnsafeBufferPointer { Data(buffer: $0) }
+            }
+            let g = FrameCodec.liveMeshGeometry(data, tint: tint, qualityColors: q)
             let tris = g?.elements.first?.primitiveCount ?? 0
             DispatchQueue.main.async {
                 self.liveMeshNode.geometry = g
@@ -546,12 +559,14 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 let b = min(255, max(0, yv + 1.772 * cb))
                 let c = SIMD3<Float>(r, g, b)
 
+                let near: UInt16 = d <= 1.5 ? 1 : 0
                 if let idx = keyToIndex[key] {
                     let i = Int(idx)
                     if counts[i] < 50_000 {
                         sums[i] += p
                         colorSums[i] += c
                         counts[i] += 1
+                        nearCounts[i] += near
                     }
                 } else {
                     keyToIndex[key] = Int32(sums.count)
@@ -560,6 +575,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                     counts.append(1)
                     keys.append(key)
                     misses.append(0)
+                    nearCounts.append(near)
                 }
             }
         }
@@ -641,11 +657,11 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             keyToIndex.removeValue(forKey: keys[i])
             if i != last {
                 sums[i] = sums[last]; colorSums[i] = colorSums[last]; counts[i] = counts[last]
-                keys[i] = keys[last]; misses[i] = misses[last]
+                keys[i] = keys[last]; misses[i] = misses[last]; nearCounts[i] = nearCounts[last]
                 keyToIndex[keys[i]] = Int32(i)
             }
             sums.removeLast(); colorSums.removeLast(); counts.removeLast()
-            keys.removeLast(); misses.removeLast()
+            keys.removeLast(); misses.removeLast(); nearCounts.removeLast()
         }
         removedTotal += toRemove.count
         let total = removedTotal
@@ -730,13 +746,34 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         return CloudStats(points: kept, size: hi - lo, center: (hi + lo) / 2, weak: weak)
     }
 
-    /// Color según cuántas veces se leyó cada punto: rojo = 1, ámbar = 2–3, verde = 4 o más.
-    private func coverageColor(_ count: UInt16) -> SIMD3<Float> {
-        switch count {
-        case 0...1: return SIMD3<Float>(0.95, 0.24, 0.20)
-        case 2...3: return SIMD3<Float>(0.98, 0.70, 0.15)
-        default:    return SIMD3<Float>(0.25, 0.85, 0.40)
+    /// Calidad de cada zona (no solo si ya se vio):
+    /// verde = leída de cerca (≤ 1.5 m) desde al menos 2 vistas → sale nítida y exacta;
+    /// amarillo = vista, pero de lejos o desde una sola vista → acércate o rodéala;
+    /// rojo = apenas vista.
+    static let qualityGood = SIMD3<Float>(0.25, 0.85, 0.40)
+    static let qualityFair = SIMD3<Float>(0.98, 0.70, 0.15)
+    static let qualityPoor = SIMD3<Float>(0.95, 0.24, 0.20)
+
+    private func qualityColor(count: UInt16, near: UInt16) -> SIMD3<Float> {
+        if near >= 8 { return Self.qualityGood }
+        if count >= 4 { return Self.qualityFair }
+        return Self.qualityPoor
+    }
+
+    /// Calidad en un punto del espacio (busca su vóxel y los 6 vecinos). Solo en `queue`.
+    private func quality(at p: SIMD3<Float>) -> SIMD3<Float> {
+        let inv = 1.0 / activeVoxel
+        let half: Int64 = 1 << 20
+        let bx = Int64((p.x * inv).rounded(.down)), by = Int64((p.y * inv).rounded(.down)), bz = Int64((p.z * inv).rounded(.down))
+        var bestCount: UInt16 = 0, bestNear: UInt16 = 0
+        for (dx, dy, dz) in [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)] {
+            let key = ((bx + Int64(dx) + half) << 42) | ((by + Int64(dy) + half) << 21) | (bz + Int64(dz) + half)
+            if let i = keyToIndex[key] {
+                bestCount = max(bestCount, counts[Int(i)])
+                bestNear = max(bestNear, nearCounts[Int(i)])
+            }
         }
+        return qualityColor(count: bestCount, near: bestNear)
     }
 
     /// Construye la geometría de puntos. En modo cobertura se incluyen también los puntos
@@ -758,7 +795,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 let k = Float(cnt)
                 verts.append(sums[i] / k)
                 if mode == .coverage {
-                    cols.append(coverageColor(cnt))
+                    cols.append(qualityColor(count: cnt, near: nearCounts[i]))
                 } else {
                     cols.append(colorSums[i] / (k * 255))
                 }

@@ -534,7 +534,15 @@ async function openScan(carpeta, nombre) {
   loader.load('/api/modelo/' + encodeURIComponent(carpeta), async (gltf) => {
     if (model) scene.remove(model);
     model = gltf.scene;
-    model.traverse(o => { if (o.isMesh) { o.material.side = THREE.DoubleSide; } });
+    // como en las fotos: sin luces ni sombras artificiales (la luz real ya está en la textura)
+    model.traverse(o => {
+      if (!o.isMesh) return;
+      const old = o.material;
+      o.material = new THREE.MeshBasicMaterial({ map: old.map || null, color: old.map ? 0xffffff : (old.color || 0xbbbbbb),
+        side: THREE.DoubleSide, vertexColors: !old.map && !!o.geometry.attributes.color });
+      if (o.material.map) { o.material.map.colorSpace = THREE.SRGBColorSpace; o.material.map.anisotropy = renderer.capabilities.getMaxAnisotropy(); }
+      old.dispose();
+    });
     scene.add(model);
     viewing = carpeta;
     if (mesh) mesh.visible = false;

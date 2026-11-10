@@ -25,6 +25,9 @@ struct ContentView: View {
                     PCStatusPill(link: engine.link, triangles: engine.liveMeshTriangles)
                     AppUpdateBanner(link: engine.link)
                 }
+                if engine.colorMode == .coverage && (engine.isScanning || engine.pointCount > 0) {
+                    QualityLegend()
+                }
                 Spacer()
                 if engine.isScanning && engine.personInView {
                     Label("Persona detectada: se ignora", systemImage: "person.fill.xmark")
@@ -429,6 +432,30 @@ struct ScansView: View {
     }
 }
 
+
+// MARK: - Leyenda de calidad
+
+struct QualityLegend: View {
+    var body: some View {
+        HStack(spacing: 12) {
+            item(ScanEngine.qualityGood, "Bien (de cerca)")
+            item(ScanEngine.qualityFair, "Acércate")
+            item(ScanEngine.qualityPoor, "Falta")
+        }
+        .font(.caption2.weight(.semibold))
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(.ultraThinMaterial, in: Capsule())
+        .foregroundStyle(.white)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func item(_ c: SIMD3<Float>, _ t: String) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(Color(red: Double(c.x), green: Double(c.y), blue: Double(c.z))).frame(width: 9, height: 9)
+            Text(t)
+        }
+    }
+}
 
 // MARK: - PC (red local)
 
