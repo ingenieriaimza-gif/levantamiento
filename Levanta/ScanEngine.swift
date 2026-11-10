@@ -15,15 +15,6 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     @Published var statusMessage: String?
     @Published var lidarAvailable = true
     @Published var showCloud = true
-    /// Vista de malla (alambre blanco + azul en lo que falta) en lugar de la nube de puntos.
-    @Published var meshView: Bool = (UserDefaults.standard.object(forKey: "vistaMalla") as? Bool) ?? LiveMeshView.supported {
-        didSet {
-            UserDefaults.standard.set(meshView, forKey: "vistaMalla")
-            liveMesh.enabled = meshView
-            pointsNode.isHidden = meshView
-        }
-    }
-    let liveMesh = LiveMeshView()
     /// Se perdió la ubicación del iPhone: hay que volver a una zona ya escaneada para seguir.
     @Published var needRelocalize = false
     @Published var colorMode: ColorMode = .coverage {
@@ -110,7 +101,12 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var fineSums: [SIMD3<Float>] = []
     private var fineColorSums: [SIMD3<Float>] = []
     private var fineCounts: [UInt16] = []
-    private let maxFineVoxels = 3_000_000
+    /// Puntos de 2 mm: todo lo que se lee de cerca (≤ 1 m), no solo las piezas enfocadas. Es la definición
+    /// real máxima del LiDAR (a 30–60 cm cada lectura cubre 1.5–2.5 mm; 1 mm sería solo ruido).
+    private let maxFineVoxels = 8_000_000
+    private let fineRange: Float = 1.0          // lecturas a menos de esto también van a la capa de 2 mm
+    private let fineDrawRadius: Float = 1.6     // alrededor de ti se dibuja la capa de 2 mm
+    private var lastCamPos = SIMD3<Float>(0, 0, 0)
 
     let pointsNode = SCNNode()
     private(set) var sceneView: ARSCNView?
@@ -172,7 +168,6 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private let maxVoxels = 7_000_000
     private var phoneFullWarned = false
     private var lostWhileScanning = false
-    private var meshViewActive = false
     private var relocCheck = 0
     /// Lo ya escaneado lejos de ti se guarda resumido (un punto cada 2 cm) para que la vista nunca se llene.
     private let archiveVoxel: Float = 0.02
@@ -197,15 +192,6 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         liveMeshNode.renderingOrder = -1
         view.scene.rootNode.addChildNode(liveMeshNode)
         view.scene.rootNode.addChildNode(focus.root)
-        liveMesh.workQueue = queue
-        liveMesh.qualityColors = { [weak self] pts in
-            guard let self else { return [] }
-            // mismos colores que la nube: rojo/amarillo = falta, verde = listo
-            return pts.map { self.quality(at: $0) }
-        }
-        liveMesh.attach(to: view)
-        liveMesh.enabled = meshView
-        pointsNode.isHidden = meshView
         view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tappedCamera(_:))))
         focus.onChange = { [weak self] zones in self?.zonesChanged(zones) }
         coach.onGuide = { [weak self] g, prog in
@@ -251,9 +237,6 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             } else {
                 peopleRemovalAvailable = false
             }
-        }
-        if LiveMeshView.supported {
-            config.sceneReconstruction = .mesh      // malla en vivo del iPhone (solo para ver)
         }
         config.worldAlignment = .gravity
         let options: ARSession.RunOptions = reset ? [.resetTracking, .removeExistingAnchors] : []
@@ -346,8 +329,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         queue.async { self.anchorPose = nil; self.stillReadings = 0; self.stillState = false }
         CameraTuning.apply(sharp: false)
         sessionName = ""
-        pointsNode.isHidden = meshView
-        liveMesh.clear()
+        pointsNode.isHidden = false
         needRelocalize = false
         queue.async { self.lostWhileScanning = false }
         queue.async {
@@ -711,6 +693,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let camPos = SIMD3<Float>(T.columns.3.x, T.columns.3.y, T.columns.3.z)
         let zones = focus.current()
         let hasZones = !zones.isEmpty
+        lastCamPos = camPos
+        if fineSums.count >= maxFineVoxels { trimFine(around: camPos) }
         let fineInv = 1.0 / fineVoxel
         let fineLimit = Float((1 << 20) - 1)
 
@@ -784,7 +768,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 let c = SIMD3<Float>(r, g, b)
 
                 // dentro de una pieza enfocada (y de cerca): además, un punto cada 2 mm
-                if zi >= 0 && d <= 1.2 && fineSums.count < maxFineVoxels {
+                if (d <= fineRange || (zi >= 0 && d <= 1.2)) && fineSums.count < maxFineVoxels {
                     let gx = (p.x * fineInv).rounded(.down), gy = (p.y * fineInv).rounded(.down)
                     let gz = (p.z * fineInv).rounded(.down)
                     if abs(gx) < fineLimit && abs(gy) < fineLimit && abs(gz) < fineLimit {
@@ -794,7 +778,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                             if fineCounts[i] < 50_000 {
                                 fineSums[i] += p; fineColorSums[i] += c; fineCounts[i] += 1
                             }
-                            if fineCounts[i] >= 3 { st.zoneConfirmed[zi] += 1 }
+                            if zi >= 0 && fineCounts[i] >= 3 { st.zoneConfirmed[zi] += 1 }
                         } else {
                             fineKeyToIndex[fk] = Int32(fineSums.count)
                             fineSums.append(p); fineColorSums.append(c); fineCounts.append(1)
@@ -1023,12 +1007,11 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         guard !previewBusy else { return }
         previewBusy = true
         let show = showCloud
-        meshViewActive = meshView
         let mode = colorMode
         queue.async {
             let minObs = self.activeMinObs
             let total = self.counts.reduce(0) { $0 + ($1 >= minObs ? 1 : 0) } + self.archivedPoints
-            let geometry = show && !self.meshViewActive ? self.buildGeometry(mode: mode, maxPoints: 900_000,
+            let geometry = show ? self.buildGeometry(mode: mode, maxPoints: 900_000,
                                                      pointSize: 3, maxRadius: 3) : nil
             DispatchQueue.main.async {
                 self.pointCount = total
@@ -1128,17 +1111,40 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         return qualityColor(count: bestCount, near: bestNear, close: bestClose, diverse: anyDiverse)
     }
 
-    /// ¿Ya hay puntos finos alrededor de este punto? (si no, se sigue dibujando el punto normal)
-    private func hasFine(near p: SIMD3<Float>) -> Bool {
+    /// La capa de 2 mm se llenó: se quita lo de una sola lectura y lo que quedó a más de 2.5 m de ti
+    /// (ahí sigue la capa de 5 mm con sus colores de calidad; al regresar se vuelve a llenar a 2 mm).
+    private func trimFine(around cam: SIMD3<Float>) {
+        let n = fineSums.count
+        var w = 0
+        for i in 0..<n {
+            let c = fineCounts[i]
+            let p = fineSums[i] / Float(c)
+            if c < 2 || simd_distance(p, cam) > 2.5 { continue }
+            if w != i { fineSums[w] = fineSums[i]; fineColorSums[w] = fineColorSums[i]; fineCounts[w] = c }
+            w += 1
+        }
+        if w > maxFineVoxels * 85 / 100 {
+            // aún lleno: solo lo más cercano (1.2 m)
+            var w2 = 0
+            for i in 0..<w where simd_distance(fineSums[i] / Float(fineCounts[i]), cam) <= 1.2 {
+                fineSums[w2] = fineSums[i]; fineColorSums[w2] = fineColorSums[i]; fineCounts[w2] = fineCounts[i]
+                w2 += 1
+            }
+            w = w2
+        }
+        let drop = n - w
+        fineSums.removeLast(drop); fineColorSums.removeLast(drop); fineCounts.removeLast(drop)
         let inv = 1.0 / fineVoxel
         let half: Int64 = 1 << 20
-        let bx = Int64((p.x * inv).rounded(.down)), by = Int64((p.y * inv).rounded(.down)), bz = Int64((p.z * inv).rounded(.down))
-        for dx in -1...1 { for dy in -1...1 { for dz in -1...1 {
-            let k = ((bx + Int64(dx) + half) << 42) | ((by + Int64(dy) + half) << 21) | (bz + Int64(dz) + half)
-            if fineKeyToIndex[k] != nil { return true }
-        } } }
-        return false
+        fineKeyToIndex.removeAll(keepingCapacity: true)
+        for i in 0..<w {
+            let p = fineSums[i] / Float(fineCounts[i])
+            let k = ((Int64((p.x * inv).rounded(.down)) + half) << 42) | ((Int64((p.y * inv).rounded(.down)) + half) << 21)
+                | (Int64((p.z * inv).rounded(.down)) + half)
+            fineKeyToIndex[k] = Int32(i)
+        }
     }
+
 
     /// Construye la geometría de puntos. En modo cobertura se incluyen también los puntos
     /// de una sola lectura (en rojo) para que se vea el ruido y lo que falta reforzar.
@@ -1152,16 +1158,18 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         var cols: [SIMD3<Float>] = []
         verts.reserveCapacity(n / step + 1)
         cols.reserveCapacity(n / step + 1)
-        let zones = focus.current()
+        let cam = lastCamPos
+        let r2 = fineDrawRadius * fineDrawRadius
+        let fineOn = !fineSums.isEmpty
         var i = 0
         while i < n {
             let cnt = counts[i]
             if cnt >= minObs {
                 let k = Float(cnt)
                 let pt = sums[i] / k
-                if !zones.isEmpty && zones.contains(where: { $0.contains(pt) }) && hasFine(near: pt) {
+                if fineOn && closeCounts[i] > 0 && simd_distance_squared(pt, cam) < r2 {
                     i += step
-                    continue          // ahí se dibujan los puntos finos
+                    continue          // cerca de ti se dibujan los puntos de 2 mm
                 }
                 verts.append(pt)
                 if mode == .coverage {
@@ -1182,14 +1190,31 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 cols.append(mode == .coverage ? qcol[Int(archQuality[j])] : archColors[j] / (k * 255))
             }
         }
-        // puntos finos (2 mm) de las piezas enfocadas: todos, sin saltar
-        let fineMin: UInt16 = mode == .coverage ? 1 : 2
+        // puntos de 2 mm alrededor de ti, con el color de calidad de su zona (el mismo de la leyenda)
+        let fineMin: UInt16 = 2
+        let fineBudget = 1_500_000
+        var nearIdx: [Int32] = []
+        nearIdx.reserveCapacity(min(fineSums.count, fineBudget * 2))
         for j in 0..<fineSums.count where fineCounts[j] >= fineMin {
+            if simd_distance_squared(fineSums[j] / Float(fineCounts[j]), cam) < r2 { nearIdx.append(Int32(j)) }
+        }
+        let fStep = max(1, nearIdx.count / fineBudget)
+        let inv5 = 1.0 / activeVoxel
+        let half5: Int64 = 1 << 20
+        for t in Swift.stride(from: 0, to: nearIdx.count, by: fStep) {
+            let j = Int(nearIdx[t])
             let k = Float(fineCounts[j])
-            verts.append(fineSums[j] / k)
+            let p = fineSums[j] / k
+            verts.append(p)
             if mode == .coverage {
-                let fc = fineCounts[j]
-                cols.append(fc >= 6 ? Self.qualityExcellent : fc >= 3 ? Self.qualityGood : Self.qualityFair)
+                let key = ((Int64((p.x * inv5).rounded(.down)) + half5) << 42) |
+                          ((Int64((p.y * inv5).rounded(.down)) + half5) << 21) | (Int64((p.z * inv5).rounded(.down)) + half5)
+                if let ci = keyToIndex[key] {
+                    let c = Int(ci)
+                    cols.append(qualityColor(count: counts[c], near: nearCounts[c], close: closeCounts[c], diverse: diverse[c]))
+                } else {
+                    cols.append(Self.qualityFair)
+                }
             } else {
                 cols.append(fineColorSums[j] / (k * 255))
             }

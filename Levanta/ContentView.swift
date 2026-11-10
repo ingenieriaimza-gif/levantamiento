@@ -29,7 +29,7 @@ struct ContentView: View {
                     PCStatusPill(link: engine.link, triangles: engine.liveMeshTriangles)
                     AppUpdateBanner(link: engine.link)
                 }
-                if (engine.meshView || engine.colorMode == .coverage) && (engine.isScanning || engine.pointCount > 0) {
+                if engine.colorMode == .coverage && (engine.isScanning || engine.pointCount > 0) {
                     QualityLegend()
                 }
                 FocusBar(focus: engine.focus,
@@ -146,18 +146,6 @@ struct ContentView: View {
 
             Spacer()
 
-            if LiveMeshView.supported {
-                Button {
-                    engine.meshView.toggle()
-                } label: {
-                    Image(systemName: engine.meshView ? "cube.transparent.fill" : "circle.grid.3x3.fill")
-                        .frame(width: 40, height: 40)
-                        .background(.ultraThinMaterial, in: Circle())
-                }
-                .accessibilityLabel(engine.meshView ? "Ver puntos con calidad" : "Ver malla")
-            }
-
-            if !engine.meshView {
             Button {
                 engine.colorMode = engine.colorMode == .coverage ? .real : .coverage
             } label: {
@@ -175,7 +163,6 @@ struct ContentView: View {
                     .background(.ultraThinMaterial, in: Circle())
             }
             .accessibilityLabel(engine.showCloud ? "Ocultar nube" : "Mostrar nube")
-            }
 
             Button {
                 showSettings = true
@@ -201,7 +188,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text("1 punto cada 5 mm")
+                    Text("2 mm de cerca · 5 mm de lejos")
                     Text("\(engine.keyframeCount) fotos")
                 }
                 .font(.caption.monospaced())
