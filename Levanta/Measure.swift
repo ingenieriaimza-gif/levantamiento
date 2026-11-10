@@ -35,6 +35,21 @@ final class MeasureController: ObservableObject {
     private var counter = 0
     private let measureColor = UIColor(red: 0.96, green: 0.66, blue: 0.13, alpha: 1)
 
+    /// Carga medidas guardadas (sin avisar a la PC).
+    func load(_ items: [[String: Any]]) {
+        func v(_ x: Any?) -> SIMD3<Float>? {
+            guard let a = x as? [NSNumber], a.count == 3 else { return nil }
+            return SIMD3<Float>(a[0].floatValue, a[1].floatValue, a[2].floatValue)
+        }
+        measures = items.compactMap { m in
+            guard let a = v(m["a"]), let b = v(m["b"]) else { return nil }
+            return Measure(id: m["id"] as? String ?? UUID().uuidString, name: m["nombre"] as? String ?? "iPhone", a: a, b: b)
+        }
+        counter = measures.count
+        pending = nil
+        redraw()
+    }
+
     // MARK: Puntos
 
     func tap(_ p: SIMD3<Float>) {
@@ -80,7 +95,7 @@ final class MeasureController: ObservableObject {
             root.addChildNode(n)
         }
         if let p = pending {
-            let s = SCNSphere(radius: CGFloat(0.006 * markScale))
+            let s = SCNSphere(radius: CGFloat(0.004 * markScale))
             s.firstMaterial = Self.overlayMaterial(.white)
             let n = SCNNode(geometry: s)
             n.simdPosition = p
@@ -91,7 +106,7 @@ final class MeasureController: ObservableObject {
 
     static func format(_ meters: Float) -> String {
         if meters >= 1 { return String(format: "%.3f m", meters) }
-        return String(format: "%.0f mm", meters * 1000)
+        return String(format: "%.1f mm", meters * 1000)
     }
 
     static func overlayMaterial(_ color: UIColor) -> SCNMaterial {
@@ -111,7 +126,7 @@ final class MeasureController: ObservableObject {
         let d = b - a
         let len = simd_length(d)
         guard len > 0.0005 else { return }
-        let cyl = SCNCylinder(radius: CGFloat(0.0015 * scale), height: CGFloat(len))
+        let cyl = SCNCylinder(radius: CGFloat(0.001 * scale), height: CGFloat(len))
         cyl.firstMaterial = overlayMaterial(color)
         let line = SCNNode(geometry: cyl)
         line.simdPosition = (a + b) / 2
@@ -119,7 +134,7 @@ final class MeasureController: ObservableObject {
         line.renderingOrder = 100
         node.addChildNode(line)
         for p in [a, b] {
-            let s = SCNSphere(radius: CGFloat(0.005 * scale))
+            let s = SCNSphere(radius: CGFloat(0.003 * scale))
             s.firstMaterial = overlayMaterial(color)
             let sn = SCNNode(geometry: s)
             sn.simdPosition = p
@@ -144,9 +159,9 @@ final class MeasureController: ObservableObject {
         let holder = SCNNode()
         holder.addChildNode(bgNode)
         holder.addChildNode(tn)
-        let k = 0.0035 * scale
+        let k = 0.0025 * scale
         holder.scale = SCNVector3(k, k, k)
-        holder.simdPosition = (a + b) / 2 + SIMD3<Float>(0, 0.03 * scale, 0)
+        holder.simdPosition = (a + b) / 2 + SIMD3<Float>(0, 0.02 * scale, 0)
         holder.constraints = [SCNBillboardConstraint()]
         node.addChildNode(holder)
     }
@@ -203,6 +218,7 @@ enum PointPicker {
 
 struct MeasurePanel: View {
     @ObservedObject var measure: MeasureController
+    var onDone: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 12) {
@@ -230,7 +246,9 @@ struct MeasurePanel: View {
                 smallButton("trash", "Borrar") { measure.clear() }
                     .disabled(measure.measures.isEmpty)
                 Spacer()
-                smallButton("checkmark", "Listo") { measure.active = false }
+                smallButton("checkmark", "Listo") {
+                    if let onDone { onDone() } else { measure.active = false }
+                }
             }
 
             if !measure.measures.isEmpty {
@@ -247,7 +265,7 @@ struct MeasurePanel: View {
                 }
                 .frame(maxHeight: 70)
             }
-            Text("Gira con un dedo y acerca con dos; toca para poner cada punto. Lo que midas aparece también en la PC.")
+            Text("Toca dos veces para acercarte a un punto. Un toque pone cada punto. Lo que midas aparece también en la PC.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }

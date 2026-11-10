@@ -257,6 +257,17 @@ class Server:
                     self.status["clave"] = self.session.keyframes
                 elif kind == MSG_MEASURES:
                     meds = [dict(m, origen="iphone") for m in h.get("medidas", [])][:500]
+                    carpeta = h.get("carpeta")
+                    if carpeta:
+                        # medidas hechas en Revisar 3D sobre un modelo terminado: se guardan con ese escaneo
+                        root = os.path.realpath(self.root)
+                        d = os.path.realpath(os.path.join(root, str(carpeta)))
+                        if d.startswith(root + os.sep) and os.path.isdir(d):
+                            with open(os.path.join(d, "medidas_iphone.json"), "w", encoding="utf-8") as f:
+                                json.dump({"medidas": meds}, f)
+                            await self.broadcast(pack(MSG_MEASURES_OUT, {"medidas": meds, "origen": "iphone",
+                                                                         "carpeta": os.path.basename(d)}), phone=False)
+                        continue
                     self.phone_measures = meds
                     if self.session is not None:
                         with open(os.path.join(self.session.dir, "medidas_iphone.json"), "w", encoding="utf-8") as f:

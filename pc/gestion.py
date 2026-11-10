@@ -162,8 +162,8 @@ def ia_instalada():
 
 
 def ia_config():
-    cfg = load_config()
-    return {"final": bool(cfg.get("ia_final", False)), "vivo": bool(cfg.get("ia_vivo", False))}
+    # configuración fija: la IA no mejoró la exactitud de los tubos en las pruebas, así que no se usa
+    return {"final": False, "vivo": False}
 
 
 def local_version():
@@ -331,6 +331,42 @@ class Gestion:
                     "archivos": files,
                 })
         return web.json_response({"carpeta": self.root, "escaneos": items})
+
+    # ---------- para el iPhone: modelos terminados (solo lectura en la red local)
+
+    async def tel_modelos(self, request):
+        items = []
+        if os.path.isdir(self.root):
+            live = self.server.session.dir if self.server.session is not None else None
+            for name in sorted(os.listdir(self.root), reverse=True):
+                d = os.path.join(self.root, name)
+                p = os.path.join(d, "resultado", "modelo_texturizado.usdz")
+                if not (name.startswith("RGBD_") and os.path.exists(p)):
+                    continue
+                if live and os.path.normpath(live) == os.path.normpath(d):
+                    continue
+                st = os.stat(p)
+                items.append({"carpeta": name, "nombre": name.replace("RGBD_", ""),
+                              "fecha": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                              "version": int(st.st_mtime), "mb": round(st.st_size / 1e6, 1)})
+                if len(items) >= 20:
+                    break
+        return web.json_response({"modelos": items})
+
+    async def tel_modelo(self, request):
+        d = self._safe(request.match_info["carpeta"])
+        p = os.path.join(d, "resultado", "modelo_texturizado.usdz")
+        if not os.path.exists(p):
+            raise web.HTTPNotFound(text="Este escaneo no tiene modelo terminado")
+        return web.FileResponse(p, headers={"Content-Type": "model/vnd.usdz+zip"})
+
+    async def tel_medidas(self, request):
+        d = self._safe(request.match_info["carpeta"])
+        try:
+            with open(os.path.join(d, "medidas_iphone.json"), encoding="utf-8") as f:
+                return web.json_response(json.load(f))
+        except (OSError, ValueError):
+            return web.json_response({"medidas": []})
 
     def _safe(self, rel):
         p = os.path.realpath(os.path.join(self.root, rel or ""))
@@ -835,6 +871,9 @@ class Gestion:
         app.router.add_post("/api/ia/instalar", self.ia_instalar)
         app.router.add_get("/api/medidas/{carpeta}", self.medidas_get)
         app.router.add_post("/api/medidas/{carpeta}", self.medidas_set)
+        app.router.add_get("/telefono/modelos.json", self.tel_modelos)        # para el iPhone (solo lectura)
+        app.router.add_get("/telefono/modelo/{carpeta}", self.tel_modelo)
+        app.router.add_get("/telefono/medidas/{carpeta}", self.tel_medidas)
         app.router.add_get("/app/info.json", self.app_info)          # visible para el iPhone en la red local
         app.router.add_get("/app/Levanta.ipa", self.app_ipa)
         self.publish_app_status()

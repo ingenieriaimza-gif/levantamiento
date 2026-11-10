@@ -36,8 +36,10 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     // Ajustes (se aplican al reiniciar o al empezar un escaneo nuevo)
-    @Published var voxelSizeCm: Double = 0.5
-    @Published var maxDepth: Double = 4.0
+    /// Configuración fija (la mejor para levantamientos con la PC): no hay ajustes que mover.
+    /// La nube del iPhone es solo una vista previa a 1 cm; la calidad final la hace la PC.
+    @Published var voxelSizeCm: Double = 1.0
+    @Published var maxDepth: Double = 3.5
     @Published var highConfidenceOnly = true
     @Published var minObservations: Int = 2
     @Published var smoothDepth = false
@@ -69,7 +71,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     /// El iPhone está quieto: ya se tomaron las lecturas de esta vista y no se agregan más puntos.
     @Published var holdingStill = false
     /// Enviar el escaneo a la PC por red local.
-    @Published var streamToPC = false {
+    @Published var streamToPC = true {
         didSet { link.setEnabled(streamToPC) }
     }
     @Published var liveMeshTriangles = 0
@@ -155,6 +157,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         sceneView = view
         startSession(reset: true)
         startPreviewTimer()
+        link.setEnabled(true)          // siempre busca la PC
         return view
     }
 
@@ -228,6 +231,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         pointCount = 0
         pointsNode.geometry = nil
         liveMeshNode.geometry = nil
+        lastLiveMesh = nil
+        lastLiveMeshTime = nil
         liveMeshTriangles = 0
         tooFast = false
         holdingStill = false
@@ -382,12 +387,15 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     /// Envía las medidas hechas en el iPhone a la PC (mismas coordenadas que el modelo).
-    func sendMeasures(_ list: [MeasureController.Measure]) {
+    /// `carpeta`: medidas sobre un modelo terminado (se guardan con ese escaneo en la PC).
+    func sendMeasures(_ list: [MeasureController.Measure], carpeta: String? = nil) {
         guard link.isConnected else { return }
         let items: [[String: Any]] = list.map { m in
             ["id": m.id, "nombre": m.name, "a": [m.a.x, m.a.y, m.a.z], "b": [m.b.x, m.b.y, m.b.z]]
         }
-        if let d = FrameCodec.pack(kind: 5, header: ["medidas": items]) { link.send(d, important: true) }
+        var h: [String: Any] = ["medidas": items]
+        if let carpeta { h["carpeta"] = carpeta }
+        if let d = FrameCodec.pack(kind: 5, header: h) { link.send(d, important: true) }
     }
 
     /// Termina el escaneo y le pide a la PC que procese todo en alta calidad.
@@ -398,7 +406,13 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         queue.async { self.streamIndex = 0 }
     }
 
+    /// Último modelo en vivo que mandó la PC (para verlo y medirlo en Revisar 3D).
+    private(set) var lastLiveMesh: Data?
+    private(set) var lastLiveMeshTime: Date?
+
     private func receiveLiveMesh(_ data: Data) {
+        lastLiveMesh = data
+        lastLiveMeshTime = Date()
         let tint = tintLiveMesh
         DispatchQueue.global(qos: .userInitiated).async {
             let g = FrameCodec.liveMeshGeometry(data, tint: tint)
@@ -494,11 +508,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let limit: Float = Float(half - 2)
 
         if sums.count >= maxVoxels {
-            scanning = false
-            DispatchQueue.main.async {
-                self.isScanning = false
-                self.statusMessage = "Límite de memoria alcanzado. Guarda el escaneo."
-            }
+            // la nube del iPhone es solo vista previa: se deja de crecer, pero el escaneo sigue
+            // (fotos y profundidad se siguen mandando a la PC y guardando para procesar)
             return
         }
 

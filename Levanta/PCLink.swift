@@ -50,6 +50,7 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     private var browser: NWBrowser?
     private var resolver: NWConnection?
     private var task: URLSessionWebSocketTask?
+    private var downloadObservers: [String: NSKeyValueObservation] = [:]
     private lazy var urlSession = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
     private let lock = NSLock()
     private var connectedFlag = false
@@ -223,6 +224,84 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
                 self.pcAppVersion = appVersion
             }
         }
+    }
+
+    // MARK: Modelos terminados en la PC (para Revisar 3D)
+
+    struct PCModel: Identifiable, Hashable {
+        let carpeta: String
+        let nombre: String
+        let fecha: String
+        let version: Int
+        let mb: Double
+        var id: String { carpeta }
+    }
+
+    /// http://ip:puerto de la PC conectada.
+    var httpBase: URL? {
+        guard isConnected, let u = task?.originalRequest?.url, let host = u.host else { return nil }
+        return URL(string: "http://\(host):\(u.port ?? 8765)")
+    }
+
+    func fetchModels(_ done: @escaping ([PCModel]) -> Void) {
+        guard let base = httpBase else { done([]); return }
+        URLSession.shared.dataTask(with: base.appendingPathComponent("telefono/modelos.json")) { data, _, _ in
+            var out: [PCModel] = []
+            if let data, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let list = obj["modelos"] as? [[String: Any]] {
+                for m in list {
+                    guard let c = m["carpeta"] as? String else { continue }
+                    out.append(PCModel(carpeta: c, nombre: m["nombre"] as? String ?? c, fecha: m["fecha"] as? String ?? "",
+                                       version: (m["version"] as? NSNumber)?.intValue ?? 0,
+                                       mb: (m["mb"] as? NSNumber)?.doubleValue ?? 0))
+                }
+            }
+            DispatchQueue.main.async { done(out) }
+        }.resume()
+    }
+
+    /// Descarga (o toma del caché) el modelo USDZ terminado. Devuelve la ruta local.
+    func downloadModel(_ m: PCModel, progress: @escaping (Double) -> Void, done: @escaping (URL?) -> Void) {
+        let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("modelos_pc", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dest = dir.appendingPathComponent("\(m.carpeta)_\(m.version).usdz")
+        if FileManager.default.fileExists(atPath: dest.path) { done(dest); return }
+        guard let base = httpBase,
+              let name = m.carpeta.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: base.absoluteString + "/telefono/modelo/" + name) else { done(nil); return }
+        let t = URLSession.shared.downloadTask(with: url) { tmp, resp, _ in
+            var ok: URL?
+            if let tmp, (resp as? HTTPURLResponse)?.statusCode == 200 {
+                // borrar versiones anteriores de este mismo escaneo
+                if let old = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+                    for f in old where f.lastPathComponent.hasPrefix(m.carpeta + "_") { try? FileManager.default.removeItem(at: f) }
+                }
+                if (try? FileManager.default.moveItem(at: tmp, to: dest)) != nil { ok = dest }
+            }
+            DispatchQueue.main.async {
+                self.downloadObservers[m.carpeta] = nil
+                done(ok)
+            }
+        }
+        let obs = t.progress.observe(\.fractionCompleted) { p, _ in
+            DispatchQueue.main.async { progress(p.fractionCompleted) }
+        }
+        downloadObservers[m.carpeta] = obs
+        t.resume()
+    }
+
+    func fetchMeasures(_ carpeta: String, done: @escaping ([[String: Any]]) -> Void) {
+        guard let base = httpBase,
+              let name = carpeta.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: base.absoluteString + "/telefono/medidas/" + name) else { done([]); return }
+        URLSession.shared.dataTask(with: url) { data, _, _ in
+            var list: [[String: Any]] = []
+            if let data, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                list = obj["medidas"] as? [[String: Any]] ?? []
+            }
+            DispatchQueue.main.async { done(list) }
+        }.resume()
     }
 
     // MARK: Envío

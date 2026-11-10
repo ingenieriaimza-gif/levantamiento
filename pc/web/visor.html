@@ -83,7 +83,7 @@
   .mlabel.iphone { border-color: #5ab0ff; }
   #viewing { top: 66px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; align-items: center; padding: 8px 12px; }
   button.btn.on { border-color: var(--accent); color: var(--accent); }
-  #hint { bottom: 16px; left: 50%; transform: translateX(-50%); padding: 8px 14px; color: var(--accent); }
+  #hint { top: 16px; left: 50%; transform: translateX(-50%); max-width: min(460px, calc(100% - 32px)); padding: 8px 14px; color: var(--accent); text-align: center; z-index: 5; }
 </style>
 </head>
 <body>
@@ -176,7 +176,7 @@
         <span class="muted">Conecta el iPhone por cable; se abre Sideloadly con la app.</span></div>
       <div class="muted">Cuando el iPhone se conecte al programa y tenga una versión anterior, la app mostrará un aviso.</div>
     </div>
-    <div class="card">
+    <div class="card" hidden>
       <div class="row"><div><div class="muted">Inteligencia artificial (profundidad)</div>
         <div id="ia-state">Revisando…</div></div></div>
       <div class="muted">Prompt Depth Anything combina la foto con el LiDAR para dar profundidad de mayor resolución.
@@ -298,7 +298,7 @@ function connect() {
     const h = JSON.parse(new TextDecoder().decode(new Uint8Array(ev.data, 5, hl)));
     if (kind === 10) onMesh(h, ev.data, 5 + hl);
     else if (kind === 11) onStatus(h);
-    else if (kind === 12) onPhoneMeasures(h.medidas || []);
+    else if (kind === 12) { if ((h.carpeta || 'vivo') === viewing) onPhoneMeasures(h.medidas || []); }
   };
 }
 connect();
