@@ -76,7 +76,8 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     m = mesh if consume else o3d.geometry.TriangleMesh(mesh)
     del mesh
     if len(m.triangles) > target_triangles:
-        m = m.simplify_quadric_decimation(target_triangles)
+        from paralelo import simplificar
+        m = simplificar(m, target_triangles, log=_log)       # todos los núcleos
     m.remove_degenerate_triangles()
     m.remove_unreferenced_vertices()
     m.compute_triangle_normals()
@@ -99,15 +100,19 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     proj_cache = {}
 
     _avance(0.38, "Revisando la nitidez de las fotos")
-    sharp = []
-    for fr in frames:
+    def _nitidez(fr):
         g = cv2.imread(fr["jpg"], cv2.IMREAD_GRAYSCALE)
-        sharp.append(cv2.Laplacian(cv2.resize(g, (g.shape[1] // 2, g.shape[0] // 2)), cv2.CV_64F).var() if g is not None else 0)
-    sharp = np.array(sharp)
+        return cv2.Laplacian(cv2.resize(g, (g.shape[1] // 2, g.shape[0] // 2)), cv2.CV_64F).var() if g is not None else 0
+    from concurrent.futures import ThreadPoolExecutor as _TP
+    from paralelo import nucleos as _nuc
+    with _TP(max_workers=_nuc()) as ex:
+        sharp = np.array(list(ex.map(_nitidez, frames)))
     # la nitidez pesa fuerte: una foto movida casi nunca gana si hay otra nítida
     sharp_w = np.clip((sharp / (np.median(sharp) + 1e-9)) ** 1.5, 0.1, 2.5)
 
-    for k, fr in enumerate(frames):
+    def _evaluar(k):
+        """Qué triángulos ve bien la foto k y con qué puntaje (corre en varios hilos a la vez)."""
+        fr = frames[k]
         w, h = int(fr["w"]), int(fr["h"])
         fx, fy, cx, cy = fr["fx"], fr["fy"], fr["cx"], fr["cy"]
         Tc = np.array(fr["T"], float).reshape(4, 4).T @ ARKIT_TO_CV      # cámara (CV) -> mundo
@@ -133,14 +138,14 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         ok = (z > 0.15) & (z < dmax) & (u > margin) & (u < w - 1 - margin) & (v > margin) & (v < h - 1 - margin)
         idx = np.nonzero(ok)[0]
         if len(idx) == 0:
-            continue
+            return None
         zu = np.clip(((u[idx] + 0.5) / zbuf_scale - 0.5).round().astype(int), 0, zw - 1)
         zv = np.clip(((v[idx] + 0.5) / zbuf_scale - 0.5).round().astype(int), 0, zh - 1)
         zb = zbuf[zv, zu]
         vis = np.abs(zb - z[idx]) < np.maximum(0.012, 0.012 * z[idx])
         idx = idx[vis]
         if len(idx) == 0:
-            continue
+            return None
         # vértices dentro de la imagen y visibles (sin tubos u objetos delante)
         Pv = (V[F[idx]].reshape(-1, 3) - t) @ R
         zvv = Pv[:, 2]
@@ -156,7 +161,7 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         idx = idx[inside]
         vvis = vvis[inside]
         if len(idx) == 0:
-            continue
+            return None
         view = C[idx] - t
         dist = np.linalg.norm(view, axis=1)
         cosang = np.abs(np.sum(N[idx] * view, 1)) / dist
@@ -165,21 +170,31 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         score = (cosang ** 2) / (dist ** 1.5) * sharp_w[k] * np.clip(edge, 0.25, 1.0)
         # si algún vértice queda tapado, la foto sólo sirve como último recurso
         score = np.where(vvis, score, score * 0.02)
-        better = score > best_score[idx]
-        # el mejor anterior pasa a segundo
-        ii = idx[better]
-        second_score[ii] = best_score[ii]
-        second_frame[ii] = best_frame[ii]
-        best_score[ii] = score[better]
-        best_frame[ii] = k
-        jj = idx[~better]
-        sec = score[~better] > second_score[jj]
-        second_score[jj[sec]] = score[~better][sec]
-        second_frame[jj[sec]] = k
-        if k % 5 == 0:
-            _avance(0.40 + 0.22 * (k + 1) / K, f"Eligiendo la mejor foto para cada zona ({k + 1} de {K})")
-        if (k + 1) % 50 == 0:
-            _log(f"  {k + 1}/{K} fotos evaluadas ({time.time() - t0:.0f} s)")
+        return idx, score
+
+    from concurrent.futures import ThreadPoolExecutor
+    from paralelo import nucleos
+    # varias fotos a la vez (el trazado de rayos y numpy sueltan el candado de Python)
+    with ThreadPoolExecutor(max_workers=min(12, nucleos())) as ex:
+        for k, res in enumerate(ex.map(_evaluar, range(K))):
+            if res is None:
+                continue
+            idx, score = res
+            better = score > best_score[idx]
+            # el mejor anterior pasa a segundo
+            ii = idx[better]
+            second_score[ii] = best_score[ii]
+            second_frame[ii] = best_frame[ii]
+            best_score[ii] = score[better]
+            best_frame[ii] = k
+            jj = idx[~better]
+            sec = score[~better] > second_score[jj]
+            second_score[jj[sec]] = score[~better][sec]
+            second_frame[jj[sec]] = k
+            if k % 5 == 0:
+                _avance(0.40 + 0.22 * (k + 1) / K, f"Eligiendo la mejor foto para cada zona ({k + 1} de {K})")
+            if (k + 1) % 50 == 0:
+                _log(f"  {k + 1}/{K} fotos evaluadas ({time.time() - t0:.0f} s)")
 
     labels = best_frame.copy()
     _log(f"  con foto: {(labels >= 0).mean() * 100:.1f} % de los triángulos")

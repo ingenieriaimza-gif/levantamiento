@@ -173,11 +173,14 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
     used = frames
     dropped = 0
     if drop_blur and len(frames) > 10:
+        from concurrent.futures import ThreadPoolExecutor
+        from paralelo import nucleos
         sh = []
-        for i, fr in enumerate(frames):
-            sh.append(sharpness(fr["jpg"]))
-            if i % 20 == 0 and etapa == "fusion":
-                avance("nitidez", i / len(frames), "Revisando fotos movidas")
+        with ThreadPoolExecutor(max_workers=nucleos()) as ex:      # todas las fotos a la vez
+            for i, v in enumerate(ex.map(lambda fr: sharpness(fr["jpg"]), frames)):
+                sh.append(v)
+                if i % 20 == 0 and etapa == "fusion":
+                    avance("nitidez", i / len(frames), "Revisando fotos movidas")
         sh = np.array(sh)
         thr = 0.45 * np.median(sh)
         used = [fr for fr, s in zip(frames, sh) if s >= thr]
@@ -193,12 +196,11 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
         device=o3c.Device("CPU:0"))
     trunc_mult = trunc / voxel
 
-    t0 = time.time()
-    n_ok = 0
-    for n, fr in enumerate(used):
+    def preparar(fr):
+        """Lee y prepara un cuadro (profundidad, color, cámara). Corre en varios hilos a la vez."""
         depth = np.fromfile(fr["depth"], dtype="<u2")
         if depth.size != dw * dh:
-            continue
+            return None
         depth = depth.reshape(dh, dw).astype(np.uint16)
         conf = None
         if os.path.exists(fr["conf"]):
@@ -207,10 +209,9 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
                 conf = c.reshape(dh, dw)
                 if min_conf > 0:
                     depth[conf < min_conf] = 0
-
         color_full = cv2.imread(fr["jpg"], cv2.IMREAD_COLOR)
         if color_full is None:
-            continue
+            return None
         iw, ih = color_full.shape[1], color_full.shape[0]
         ow, oh = dw, dh
         if ia is not None:
@@ -227,28 +228,52 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
             # solo lo que cae dentro de la caja de la pieza (+2 cm): el resto no se integra
             depth = recortar_a_zona(depth, fr, zona, ow, oh, iw, ih)
             if not depth.any():
-                continue
-
+                return None
         sx, sy = ow / float(fr.get("w", iw)), oh / float(fr.get("h", ih))
         # escalar el centro óptico respecto al centro del píxel
         K = np.array([[fr["fx"] * sx, 0, (fr["cx"] + 0.5) * sx - 0.5 + PIXEL_OFFSET],
                       [0, fr["fy"] * sy, (fr["cy"] + 0.5) * sy - 0.5 + PIXEL_OFFSET],
                       [0, 0, 1]], dtype=np.float64)
         cam_to_world = pose_matrix(fr) @ ARKIT_TO_CV
-        Kt = o3c.Tensor(K, o3c.float64)
-        Et = o3c.Tensor(np.linalg.inv(cam_to_world), o3c.float64)
-        dimg = o3d.t.geometry.Image(o3c.Tensor(np.ascontiguousarray(depth)))
-        cimg = o3d.t.geometry.Image(o3c.Tensor(np.ascontiguousarray(color)))
-        coords = vbg.compute_unique_block_coordinates(dimg, Kt, Et, 1000.0, dmax,
-                                                      trunc_voxel_multiplier=trunc_mult)
-        vbg.integrate(coords, dimg, cimg, Kt, Et, 1000.0, dmax, trunc_voxel_multiplier=trunc_mult)
-        n_ok += 1
-        if n % 5 == 0 and etapa in ("fusion", "completo"):
-            avance(etapa, 0.85 * (n + 1) / len(used),
-                   f"Uniendo cuadros {n + 1} de {len(used)}" if etapa == "fusion"
-                   else f"Completando zonas difíciles ({n + 1} de {len(used)})")
-        if (n + 1) % 50 == 0:
-            log(f"  {n + 1}/{len(used)} cuadros fusionados ({time.time() - t0:.0f} s)")
+        return np.ascontiguousarray(depth), np.ascontiguousarray(color), K, np.linalg.inv(cam_to_world)
+
+    t0 = time.time()
+    n_ok = 0
+    from concurrent.futures import ThreadPoolExecutor
+    from paralelo import nucleos
+    # los cuadros se leen y preparan en varios hilos mientras el volumen integra (que ya usa todos los núcleos);
+    # con IA, uno a la vez (usa la tarjeta de video)
+    hilos = 1 if ia is not None else max(2, min(8, nucleos() // 2))
+    with ThreadPoolExecutor(max_workers=hilos) as ex:
+        pendientes = []
+        it = iter(used)
+        for fr in it:
+            pendientes.append(ex.submit(preparar, fr))
+            if len(pendientes) >= hilos * 3:
+                break
+        n = -1
+        while pendientes:
+            res = pendientes.pop(0).result()
+            nxt = next(it, None)
+            if nxt is not None:
+                pendientes.append(ex.submit(preparar, nxt))
+            n += 1
+            if res is not None:
+                depth, color, K, E = res
+                Kt = o3c.Tensor(K, o3c.float64)
+                Et = o3c.Tensor(E, o3c.float64)
+                dimg = o3d.t.geometry.Image(o3c.Tensor(depth))
+                cimg = o3d.t.geometry.Image(o3c.Tensor(color))
+                coords = vbg.compute_unique_block_coordinates(dimg, Kt, Et, 1000.0, dmax,
+                                                              trunc_voxel_multiplier=trunc_mult)
+                vbg.integrate(coords, dimg, cimg, Kt, Et, 1000.0, dmax, trunc_voxel_multiplier=trunc_mult)
+                n_ok += 1
+            if n % 5 == 0 and etapa in ("fusion", "completo"):
+                avance(etapa, 0.85 * (n + 1) / len(used),
+                       f"Uniendo cuadros {n + 1} de {len(used)}" if etapa == "fusion"
+                       else f"Completando zonas difíciles ({n + 1} de {len(used)})")
+            if (n + 1) % 50 == 0:
+                log(f"  {n + 1}/{len(used)} cuadros fusionados ({time.time() - t0:.0f} s)")
     if ia_aporte:
         log(f"  IA: aportó detalle en {np.mean(ia_aporte) * 100:.0f} % de los píxeles (el resto, LiDAR)")
     return vbg, n_ok, dropped
@@ -388,28 +413,17 @@ def extract(vbg, min_weight):
 
 
 def clean_mesh(mesh, min_triangles):
-    mesh.remove_duplicated_vertices()
-    mesh.remove_degenerate_triangles()
-    mesh.remove_unreferenced_vertices()
-    if len(mesh.triangles) == 0:
-        return mesh
-    labels, counts, _ = mesh.cluster_connected_triangles()
-    labels = np.asarray(labels)
-    counts = np.asarray(counts)
-    small = counts[labels] < min_triangles
-    mesh.remove_triangles_by_mask(small)
-    mesh.remove_unreferenced_vertices()
-    mesh.compute_vertex_normals()
-    return mesh
+    """Une vértices repetidos y quita triángulos degenerados y pedazos sueltos (rápido, ver paralelo.py)."""
+    from paralelo import limpiar
+    return limpiar(mesh, min_triangles)
 
 
 def acabado(mesh):
     """Superficies más reales: suavizado Taubin (quita la ondulación del LiDAR sin encoger).
     En la escena de prueba no cambia la mediana (1.2 mm) y baja el error del 95 % de 6.3 a 5.9 mm.
     (El relleno de huecos de Open3D se probó, pero en Windows cierra el programa: no se usa.)"""
-    mesh = mesh.filter_smooth_taubin(number_of_iterations=10)
-    mesh.compute_vertex_normals()
-    return mesh
+    from paralelo import taubin_paralelo
+    return taubin_paralelo(mesh, 10, log=log)          # todos los núcleos, mismo resultado
 
 
 def solo_lo_nuevo(completa, exacta, cerca=0.010, min_triangles=60):
@@ -521,6 +535,7 @@ def main():
         tex_info = None
         if not args.sin_textura:
             import texturizar
+            from paralelo import simplificar
             from texturizar import texture_mesh
             texturizar.AVANCE = lambda f, t: avance("fotos", f, t)
             texturizar.EXPORTAR_OBJ = todos
@@ -559,10 +574,10 @@ def main():
                 if dentro is not None:
                     lim_d = target_tex // 2
                     if len(dentro.triangles) > lim_d:
-                        dentro = dentro.simplify_quadric_decimation(lim_d)
+                        dentro = simplificar(dentro, lim_d, log=log)
                     lim_f = max(200_000, target_tex - len(dentro.triangles))
                     if len(fuera.triangles) > lim_f:
-                        fuera = fuera.simplify_quadric_decimation(lim_f)
+                        fuera = simplificar(fuera, lim_f, log=log)
                     tex_mesh = fuera + dentro
                     tex_mesh.compute_vertex_normals()
                     target_tex = len(tex_mesh.triangles) + 1

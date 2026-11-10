@@ -431,9 +431,14 @@ class Server:
         fallo = None
         try:
             for (a, b), cmd in zip(tramos, cmds):
+                # toda la PC: todos los núcleos y prioridad alta (la PC sigue usable, pero esto va primero)
+                nuc = str(os.cpu_count() or 4)
+                env = dict(os.environ, OMP_NUM_THREADS=nuc, MKL_NUM_THREADS=nuc, OPENBLAS_NUM_THREADS=nuc,
+                           NUMEXPR_NUM_THREADS=nuc)
+                prioridad = 0x00008000 if sys.platform.startswith("win") else 0     # ABOVE_NORMAL_PRIORITY_CLASS
                 proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
-                                                            stderr=asyncio.subprocess.STDOUT,
-                                                            creationflags=NO_WINDOW)
+                                                            stderr=asyncio.subprocess.STDOUT, env=env,
+                                                            creationflags=NO_WINDOW | prioridad)
                 async for line in proc.stdout:
                     text = line.decode("utf-8", errors="replace").rstrip()
                     if not text or text.startswith("Warning"):
