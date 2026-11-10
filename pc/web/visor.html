@@ -650,10 +650,10 @@ async function loadScans() {
           if (rows.length) body.append(el('div', { className: 'file-group' }, el('h4', { textContent: titulo }), ...rows));
         };
         grupo('Navisworks (interferencias)',
-          fileRow('Malla del espacio', 'superficies para Clash Detective; en milímetros', 'malla_solidworks.stl'),
-          fileRow('Nube de puntos con color', 'se ve como fotos; en metros', 'nube_navisworks.pts'));
+          fileRow('Modelo con fotos', 'se ve como el lugar real y sirve en Clash Detective; en milímetros', 'obj/modelo_texturizado.obj', 'modelo_texturizado.obj'),
+          fileRow('Malla sin color', 'más ligera; en milímetros', 'malla_solidworks.stl'));
         grupo('SolidWorks',
-          fileRow('Malla del espacio', 'Insertar › Componente; en milímetros', 'malla_solidworks.stl'));
+          fileRow('Malla del espacio', 'Abrir como cuerpo de gráficos e Insertar › Componente; en milímetros', 'malla_solidworks.stl'));
         grupo('Otros',
           fileRow('Modelo con fotos', 'para el iPhone (Vista rápida) o AR', 'modelo_texturizado.usdz'),
           fileRow('Nube E57', 'para ReCap u otros programas', 'nube_fusionada.e57'),

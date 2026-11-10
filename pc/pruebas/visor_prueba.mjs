@@ -27,7 +27,7 @@ const pack = (kind, obj) => {
 };
 w.fetch = async (u) => ({ ok: true, json: async () => (u.includes('escaneos') ? { carpeta: 'C:/x', escaneos: [
   { nombre: 'a', carpeta: 'RGBD_a', fecha: '', cuadros: 5, procesado: true, splat: true, descartado: false, en_curso: false, con_modelo: true,
-    archivos: [{ nombre: 'modelo_texturizado.glb', mb: 1 }, { nombre: 'malla_solidworks.stl', mb: 2 }, { nombre: 'nube_navisworks.pts', mb: 3 }] },
+    archivos: [{ nombre: 'modelo_texturizado.glb', mb: 1 }, { nombre: 'malla_solidworks.stl', mb: 2 }, { nombre: 'obj/modelo_texturizado.obj', mb: 3 }] },
   { nombre: 'b', carpeta: 'RGBD_b', fecha: '', cuadros: 5, procesado: true, descartado: false, en_curso: false, con_modelo: false, error: 'sin memoria', archivos: [] },
   { nombre: 'c', carpeta: 'RGBD_c', fecha: '', cuadros: 5, procesado: false, descartado: false, en_curso: false, procesando: true, archivos: [] },
   { nombre: 'd', carpeta: 'RGBD_d', fecha: '', cuadros: 5, procesado: false, descartado: false, en_curso: true, iphone_conectado: false, archivos: [] }] } : { ips: ['1.2.3.4'], puerto: 8765, medidas: [], pc: 4 }) });

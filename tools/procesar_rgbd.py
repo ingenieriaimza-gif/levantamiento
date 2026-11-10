@@ -4,7 +4,6 @@ Fusión RGB-D de paquetes grabados por la app 3D (formato "levanta-rgbd").
 
 Lee una o varias partes (.zip o carpetas), fusiona todos los cuadros en un volumen TSDF
 y exporta:
-  nube_navisworks.pts  nube con color, metros, Z arriba  -> Navisworks (Agregar), sin ReCap
   nube_fusionada.e57   nube con color, metros, Z arriba  -> ReCap
   nube_fusionada.ply   igual, en PLY binario
   malla_color.ply      malla con color por vértice, metros, Z arriba
@@ -297,18 +296,6 @@ def write_e57(path, pts, cols):
     e.close()
 
 
-def write_pts(path, pts, cols):
-    """Nube Leica PTS (texto): Navisworks la abre directo. x y z intensidad r g b, en metros."""
-    with open(path, "w", encoding="ascii", newline="\n") as f:
-        f.write(f"{len(pts)}\n")
-        step = 500_000
-        for i in range(0, len(pts), step):
-            p, c = pts[i:i + step], cols[i:i + step].astype(int)
-            lines = [f"{a:.4f} {b:.4f} {z:.4f} 0 {r} {g} {bl}"
-                     for (a, b, z), (r, g, bl) in zip(p.tolist(), c.tolist())]
-            f.write("\n".join(lines) + "\n")
-
-
 def main():
     ap = argparse.ArgumentParser(description="Fusión RGB-D de la app 3D")
     ap.add_argument("entradas", nargs="+", help="partes .zip o carpetas del paquete")
@@ -322,7 +309,7 @@ def main():
     ap.add_argument("--sin-filtro-borrosas", action="store_true")
     ap.add_argument("--escala", nargs=2, type=float, metavar=("REAL", "NUBE"),
                     help="calibración: distancia real y la misma distancia medida en la nube (m)")
-    ap.add_argument("--max-triangulos-stl", type=int, default=1_500_000)
+    ap.add_argument("--max-triangulos-stl", type=int, default=800_000)
     ap.add_argument("--sin-textura", action="store_true", help="no generar el modelo con fotos")
     ap.add_argument("--ia", action="store_true", help="refinar la profundidad con IA (Prompt Depth Anything)")
     ap.add_argument("--ia-ancho", type=int, default=768, help="ancho de la profundidad refinada por IA")
@@ -397,19 +384,21 @@ def main():
         log("Exportando nube (PLY, E57)…")
         o3d.io.write_point_cloud(out("nube_fusionada.ply"), pcd, write_ascii=False)
         write_e57(out("nube_fusionada.e57"), pts, cols)
-        avance("exportar", 0.35, "Guardando la nube para Navisworks")
-        log("Exportando nube para Navisworks (PTS)…")
-        write_pts(out("nube_navisworks.pts"), pts, cols)
         avance("exportar", 0.7, "Guardando la malla para Navisworks y SolidWorks")
         log("Exportando malla (PLY, STL)…")
         o3d.io.write_triangle_mesh(out("malla_color.ply"), mesh, write_ascii=False)
         gc.collect()
 
-        stl = o3d.geometry.TriangleMesh(mesh)
+        # malla para SolidWorks/Navisworks: suavizado Taubin (quita la ondulación del LiDAR sin
+        # encoger), reducción por vóxel (poca memoria) y otro suavizado ligero. En la escena de prueba
+        # esto quedó MÁS exacto que la malla sin tratar (95 %: 4.3 mm vs 6.2 mm) con la mitad de triángulos.
+        stl = o3d.geometry.TriangleMesh(mesh).filter_smooth_taubin(number_of_iterations=10)
         if len(stl.triangles) > args.max_triangulos_stl:
-            # agrupamiento por vóxel: mucha menos memoria que la decimación cuadrática
             ratio = math.sqrt(len(stl.triangles) / args.max_triangulos_stl)
             stl = stl.simplify_vertex_clustering(voxel_size=args.voxel * ratio)
+            stl.remove_degenerate_triangles()
+            stl.remove_unreferenced_vertices()
+        stl = stl.filter_smooth_taubin(number_of_iterations=5)
         stl.scale(1000.0, center=(0, 0, 0))     # metros -> milímetros
         stl.compute_triangle_normals()
         stl.vertex_colors = o3d.utility.Vector3dVector()
@@ -425,12 +414,12 @@ def main():
             f"Nube: {len(pts):,} puntos",
             f"Malla: {len(mesh.triangles):,} triángulos (STL: {len(stl.triangles):,})",
             f"Extensión (X × Y × Z): {hi[0] - lo[0]:.3f} × {hi[1] - lo[1]:.3f} × {hi[2] - lo[2]:.3f} m",
-            "Sistema: metros, Z hacia arriba (STL en milímetros). Origen: donde arrancó el escaneo.",
+            "Sistema: Z hacia arriba; STL y OBJ en milímetros (nube en metros). Origen: donde arrancó el escaneo.",
         ]
         if tex_info:
             rep.append(f"Modelo con fotos: {tex_info['triangles']:,} triángulos, {tex_info['photos_used']} fotos, "
                        f"{tex_info['pages']} página(s) de textura, {tex_info['coverage'] * 100:.1f} % cubierto "
-                       "(modelo_texturizado.glb/.usdz, Y arriba; obj/ con Z arriba)")
+                       "(modelo_texturizado.glb/.usdz en metros, Y arriba; obj/ para Navisworks en milímetros, Z arriba)")
         with open(out("reporte.txt"), "w") as f:
             f.write("\n".join(rep) + "\n")
         log("\n".join(rep))

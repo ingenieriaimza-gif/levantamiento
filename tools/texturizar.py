@@ -366,14 +366,14 @@ def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
         scene.add_geometry(tm, geom_name=f"pagina_{pg}")
         usd_parts.append((pg, verts, faces, uv_unique))
 
-        # OBJ (Z arriba)
+        # OBJ (Z arriba, milímetros): Navisworks lo abre con sus fotos
         tex_name = f"textura_{pg}.jpg"
         cv2.imwrite(os.path.join(obj_dir, tex_name), img, [cv2.IMWRITE_JPEG_QUALITY, 90])
         mtl_lines += [f"newmtl pagina_{pg}", "Ka 1 1 1", "Kd 1 1 1", "Ks 0 0 0", "d 1", "illum 1",
                       f"map_Kd {tex_name}", ""]
         vz = Vz[uk[:, 0].astype(int)]
         obj_lines.append(f"o pagina_{pg}")
-        obj_lines += [f"v {p[0]:.5f} {p[1]:.5f} {p[2]:.5f}" for p in vz]
+        obj_lines += [f"v {p[0]:.2f} {p[1]:.2f} {p[2]:.2f}" for p in vz * 1000.0]   # milímetros, como el STL
         obj_lines += [f"vt {q[0]:.6f} {q[1]:.6f}" for q in uv_unique]
         obj_lines.append(f"usemtl pagina_{pg}")
         ff = faces + 1 + v_off

@@ -316,7 +316,7 @@ class Gestion:
                 files = []
                 if os.path.isdir(res):
                     for fn in ("modelo_texturizado.usdz", "nube_fusionada.e57", "malla_solidworks.stl",
-                               "nube_navisworks.pts", "modelo_texturizado.glb", "reporte.txt"):
+                               "obj/modelo_texturizado.obj", "modelo_texturizado.glb", "reporte.txt"):
                         p = os.path.join(res, fn)
                         if os.path.exists(p):
                             files.append({"nombre": fn, "mb": round(os.path.getsize(p) / 1e6, 1)})
