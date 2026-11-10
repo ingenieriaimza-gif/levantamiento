@@ -79,6 +79,19 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     let link = PCLink()
     let liveMeshNode = SCNNode()
     let measure = MeasureController()
+    /// Piezas enfocadas (zonas de detalle de 2 mm).
+    let focus = FocusController()
+    /// Guía para la pieza más cercana ("acércate", "rodéala"…).
+    @Published var focusGuide: String?
+
+    // puntos finos (2 mm) dentro de las piezas enfocadas (solo en `queue`)
+    private let fineVoxel: Float = 0.002
+    private var fineKeyToIndex: [Int64: Int32] = [:]
+    private var fineSums: [SIMD3<Float>] = []
+    private var fineColorSums: [SIMD3<Float>] = []
+    private var fineCounts: [UInt16] = []
+    private let maxFineVoxels = 3_000_000
+    private var lastGuideTime: TimeInterval = 0
 
     let pointsNode = SCNNode()
     private(set) var sceneView: ARSCNView?
@@ -130,6 +143,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     /// Movimiento mínimo para que cuente como vista nueva.
     private let newViewMove: Float = 0.02          // 2 cm
     private let newViewTurn: Float = 3 * .pi / 180  // 3°
+    /// Cerca de una pieza enfocada: vistas nuevas con menos movimiento y más fotos.
+    private var nearFocus = false
     private var lastStreamTime: TimeInterval = 0
     private var streamIndex = 0
     private var sessionName = ""        // solo en el hilo principal
@@ -149,11 +164,15 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         view.scene.rootNode.addChildNode(pointsNode)
         liveMeshNode.renderingOrder = -1
         view.scene.rootNode.addChildNode(liveMeshNode)
+        view.scene.rootNode.addChildNode(focus.root)
+        view.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(tappedCamera(_:))))
+        focus.onChange = { [weak self] zones in self?.zonesChanged(zones) }
         link.onMesh = { [weak self] data in self?.receiveLiveMesh(data) }
         link.onConnected = { [weak self] in
             guard let self else { return }
             if self.isScanning { self.link.sendStart(name: self.currentSessionName()) }
             if !self.measure.measures.isEmpty { self.sendMeasures(self.measure.measures) }
+            if !self.focus.zones.isEmpty { self.sendZones(self.focus.zones) }
         }
         measure.onChange = { [weak self] list in self?.sendMeasures(list) }
         view.session.delegate = self
@@ -226,12 +245,64 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
     }
 
+    // MARK: Piezas enfocadas
+
+    /// Toque en la cámara: identifica la pieza bajo el dedo y la enfoca.
+    @objc private func tappedCamera(_ g: UITapGestureRecognizer) {
+        guard let v = sceneView, let frame = v.session.currentFrame else { return }
+        let o = v.window?.windowScene?.interfaceOrientation ?? .portrait
+        focus.select(at: g.location(in: v), viewSize: v.bounds.size, frame: frame, orientation: o)
+        let msgAt = Date()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+            // el aviso de "pieza enfocada" se quita solo
+            if let self, !self.focus.busy, Date().timeIntervalSince(msgAt) >= 5.9 { self.focus.message = nil }
+        }
+    }
+
+    private func zonesChanged(_ zones: [FocusZone]) {
+        sendZones(zones)
+        // se guarda con el escaneo del iPhone, para procesarlo después en la PC
+        if let dir = recorder.directory,
+           let data = try? JSONSerialization.data(withJSONObject: ["zonas": zones.map { $0.json }]) {
+            try? data.write(to: dir.appendingPathComponent("zonas.json"))
+        }
+        if zones.isEmpty { focusGuide = nil }
+    }
+
+    func sendZones(_ zones: [FocusZone]) {
+        guard link.isConnected else { return }
+        if let d = FrameCodec.pack(kind: 6, header: ["zonas": zones.map { $0.json }]) { link.send(d, important: true) }
+    }
+
+    /// Guía de distancia para la pieza más cercana (en `queue`, cada medio segundo).
+    private func updateFocusGuide(_ frame: ARFrame, zones: [FocusZone]) {
+        guard frame.timestamp - lastGuideTime >= 0.5 else { return }
+        lastGuideTime = frame.timestamp
+        let T = frame.camera.transform
+        let cam = SIMD3<Float>(T.columns.3.x, T.columns.3.y, T.columns.3.z)
+        guard let z = zones.min(by: { $0.distance(to: cam) < $1.distance(to: cam) }) else {
+            DispatchQueue.main.async { self.focusGuide = nil }
+            return
+        }
+        let d = z.distance(to: cam)
+        let text: String
+        if d > 0.8 {
+            text = String(format: "%@: estás a %.1f m · acércate a 30–60 cm", z.name, d)
+        } else if d < 0.2 {
+            text = "\(z.name): muy cerca · aléjate un poco (mínimo 25 cm)"
+        } else {
+            text = "\(z.name): buena distancia · rodéala despacio por todos lados"
+        }
+        DispatchQueue.main.async { if self.focusGuide != text { self.focusGuide = text } }
+    }
+
     func reset() {
         if link.isConnected, let d = FrameCodec.pack(kind: 4, header: [:]) {
             link.send(d, important: true)            // la PC descarta lo recibido de este escaneo
         }
         isScanning = false
         measure.clear()
+        focus.clear()
         pointCount = 0
         pointsNode.geometry = nil
         liveMeshNode.geometry = nil
@@ -260,6 +331,10 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             self.keys.removeAll(keepingCapacity: false)
             self.misses.removeAll(keepingCapacity: false)
             self.nearCounts.removeAll(keepingCapacity: false)
+            self.fineKeyToIndex.removeAll(keepingCapacity: false)
+            self.fineSums.removeAll(keepingCapacity: false)
+            self.fineColorSums.removeAll(keepingCapacity: false)
+            self.fineCounts.removeAll(keepingCapacity: false)
             self.closeCounts.removeAll(keepingCapacity: false)
             self.firstDir.removeAll(keepingCapacity: false)
             self.diverse.removeAll(keepingCapacity: false)
@@ -295,12 +370,17 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
         updatePersonIndicator(mask != nil)
         updateMotion(frame)
+        let zones = focus.current()
+        updateFocusGuide(frame, zones: zones)
+        let camT = frame.camera.transform
+        let camP = SIMD3<Float>(camT.columns.3.x, camT.columns.3.y, camT.columns.3.z)
+        nearFocus = zones.contains { $0.distance(to: camP) < 1.0 }
         // si no te mueves, la misma vista ya está leída: no se agregan más puntos ni se manda a la PC
         guard isNewView(frame.camera.transform) else { return }
         integrate(frame, mask: mask)
         var savedKeyframe = false
         if activeRecordRGBD && recorder.isActive, let depth = chosen,
-           recorder.consider(frame: frame, depth: depth, mask: mask) {
+           recorder.consider(frame: frame, depth: depth, mask: mask, dense: nearFocus) {
             savedKeyframe = true
             let n = recorder.count
             DispatchQueue.main.async { self.keyframeCount = n }
@@ -321,7 +401,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                                    SIMD3<Float>(A.columns.3.x, A.columns.3.y, A.columns.3.z))
             var ang = (simd_quatf(A).inverse * simd_quatf(T)).angle
             if ang > .pi { ang = 2 * .pi - ang }
-            moved = dp > newViewMove || ang > newViewTurn
+            moved = nearFocus ? (dp > newViewMove * 0.5 || ang > newViewTurn * 0.6)
+                              : (dp > newViewMove || ang > newViewTurn)
         }
         if moved {
             anchorPose = T
@@ -504,6 +585,10 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let cy = (K[2][1] + 0.5) * sy - 0.5
         let T = frame.camera.transform
         let camPos = SIMD3<Float>(T.columns.3.x, T.columns.3.y, T.columns.3.z)
+        let zones = focus.current()
+        let hasZones = !zones.isEmpty
+        let fineInv = 1.0 / fineVoxel
+        let fineLimit = Float((1 << 20) - 1)
 
         let inv = 1.0 / activeVoxel
         let maxD = activeMaxDepth
@@ -549,6 +634,24 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 let g = min(255, max(0, yv - 0.344136 * cb - 0.714136 * cr))
                 let b = min(255, max(0, yv + 1.772 * cb))
                 let c = SIMD3<Float>(r, g, b)
+
+                // dentro de una pieza enfocada (y de cerca): además, un punto cada 2 mm
+                if hasZones && d <= 1.2 && fineSums.count < maxFineVoxels && zones.contains(where: { $0.contains(p) }) {
+                    let gx = (p.x * fineInv).rounded(.down), gy = (p.y * fineInv).rounded(.down)
+                    let gz = (p.z * fineInv).rounded(.down)
+                    if abs(gx) < fineLimit && abs(gy) < fineLimit && abs(gz) < fineLimit {
+                        let fk = ((Int64(gx) + half) << 42) | ((Int64(gy) + half) << 21) | (Int64(gz) + half)
+                        if let fi = fineKeyToIndex[fk] {
+                            let i = Int(fi)
+                            if fineCounts[i] < 50_000 {
+                                fineSums[i] += p; fineColorSums[i] += c; fineCounts[i] += 1
+                            }
+                        } else {
+                            fineKeyToIndex[fk] = Int32(fineSums.count)
+                            fineSums.append(p); fineColorSums.append(c); fineCounts.append(1)
+                        }
+                    }
+                }
 
                 let near: UInt16 = d <= 1.5 ? 1 : 0
                 let close = d <= 1.0
@@ -797,6 +900,18 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         return qualityColor(count: bestCount, near: bestNear, close: bestClose, diverse: anyDiverse)
     }
 
+    /// ¿Ya hay puntos finos alrededor de este punto? (si no, se sigue dibujando el punto normal)
+    private func hasFine(near p: SIMD3<Float>) -> Bool {
+        let inv = 1.0 / fineVoxel
+        let half: Int64 = 1 << 20
+        let bx = Int64((p.x * inv).rounded(.down)), by = Int64((p.y * inv).rounded(.down)), bz = Int64((p.z * inv).rounded(.down))
+        for dx in -1...1 { for dy in -1...1 { for dz in -1...1 {
+            let k = ((bx + Int64(dx) + half) << 42) | ((by + Int64(dy) + half) << 21) | (bz + Int64(dz) + half)
+            if fineKeyToIndex[k] != nil { return true }
+        } } }
+        return false
+    }
+
     /// Construye la geometría de puntos. En modo cobertura se incluyen también los puntos
     /// de una sola lectura (en rojo) para que se vea el ruido y lo que falta reforzar.
     private func buildGeometry(mode: ColorMode, maxPoints: Int,
@@ -809,12 +924,18 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         var cols: [SIMD3<Float>] = []
         verts.reserveCapacity(n / step + 1)
         cols.reserveCapacity(n / step + 1)
+        let zones = focus.current()
         var i = 0
         while i < n {
             let cnt = counts[i]
             if cnt >= minObs {
                 let k = Float(cnt)
-                verts.append(sums[i] / k)
+                let pt = sums[i] / k
+                if !zones.isEmpty && zones.contains(where: { $0.contains(pt) }) && hasFine(near: pt) {
+                    i += step
+                    continue          // ahí se dibujan los puntos finos
+                }
+                verts.append(pt)
                 if mode == .coverage {
                     cols.append(qualityColor(count: cnt, near: nearCounts[i], close: closeCounts[i], diverse: diverse[i]))
                 } else {
@@ -822,6 +943,18 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 }
             }
             i += step
+        }
+        // puntos finos (2 mm) de las piezas enfocadas: todos, sin saltar
+        let fineMin: UInt16 = mode == .coverage ? 1 : 2
+        for j in 0..<fineSums.count where fineCounts[j] >= fineMin {
+            let k = Float(fineCounts[j])
+            verts.append(fineSums[j] / k)
+            if mode == .coverage {
+                let fc = fineCounts[j]
+                cols.append(fc >= 6 ? Self.qualityExcellent : fc >= 3 ? Self.qualityGood : Self.qualityFair)
+            } else {
+                cols.append(fineColorSums[j] / (k * 255))
+            }
         }
         guard !verts.isEmpty else { return nil }
 

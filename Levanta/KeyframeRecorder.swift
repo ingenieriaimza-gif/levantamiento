@@ -106,9 +106,12 @@ final class KeyframeRecorder {
     /// Decide si este cuadro es clave (se movió o giró lo suficiente) y lo guarda.
     /// Se llama en la cola de escaneo. Devuelve true si se guardó.
     @discardableResult
-    func consider(frame: ARFrame, depth: ARDepthData, mask: [Bool]? = nil) -> Bool {
+    func consider(frame: ARFrame, depth: ARDepthData, mask: [Bool]? = nil, dense: Bool = false) -> Bool {
         guard directory != nil, count < maxFrames else { return false }
-        guard frame.timestamp - lastTime >= minInterval else { return false }
+        // dense = cerca de una pieza enfocada: fotos cada 3 cm o 3° (en lugar de 7 cm o 6°)
+        let minT = dense ? Float(0.03) : minTranslation
+        let minR = dense ? Float(3 * Float.pi / 180) : minRotation
+        guard frame.timestamp - lastTime >= (dense ? 0.15 : minInterval) else { return false }
         let T = frame.camera.transform
         if let L = lastPose {
             let dp = simd_distance(SIMD3<Float>(T.columns.3.x, T.columns.3.y, T.columns.3.z),
@@ -116,7 +119,7 @@ final class KeyframeRecorder {
             let q = simd_quatf(L).inverse * simd_quatf(T)
             var ang = q.angle
             if ang > .pi { ang = 2 * .pi - ang }
-            if dp < minTranslation && ang < minRotation { return false }
+            if dp < minT && ang < minR { return false }
         }
 
         // Ya toca foto: tomar esta solo si es nítida comparada con las recientes,

@@ -28,6 +28,10 @@ struct ContentView: View {
                 if engine.colorMode == .coverage && (engine.isScanning || engine.pointCount > 0) {
                     QualityLegend()
                 }
+                FocusBar(focus: engine.focus,
+                         guide: engine.isScanning
+                            ? (engine.focusGuide ?? (engine.focus.zones.isEmpty ? "Toca una pieza para enfocarla en detalle" : nil))
+                            : nil)
                 Spacer()
                 if engine.isScanning && engine.personInView {
                     Label("Persona detectada: se ignora", systemImage: "person.fill.xmark")
