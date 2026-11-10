@@ -134,6 +134,38 @@ def pick_folder_dialog(initial):
     return path or None
 
 
+# ------------------------------------------------------------------ IA (módulo opcional)
+
+IA_DIR = os.path.join(RAIZ, "ia")
+IA_PAQUETES = os.path.join(IA_DIR, "paquetes")
+IA_MODELOS = os.path.join(IA_DIR, "modelos")
+IA_MODELO = "depth-anything/prompt-depth-anything-vits-hf"
+IA_TORCH = "2.6.0"
+IA_TRANSFORMERS = "5.22.2"
+
+
+def gpu_nvidia():
+    """Nombre de la tarjeta NVIDIA o None."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"], capture_output=True,
+                           text=True, timeout=10, creationflags=0x08000000 if sys.platform.startswith("win") else 0)
+        name = r.stdout.strip().splitlines()[0] if r.returncode == 0 and r.stdout.strip() else None
+        return name
+    except Exception:       # noqa: BLE001
+        return None
+
+
+def ia_instalada():
+    modelo = os.path.join(IA_MODELOS, "models--" + IA_MODELO.replace("/", "--"))
+    return (os.path.isdir(os.path.join(IA_PAQUETES, "torch")) and
+            os.path.isdir(os.path.join(IA_PAQUETES, "transformers")) and os.path.isdir(modelo))
+
+
+def ia_config():
+    cfg = load_config()
+    return {"final": bool(cfg.get("ia_final", True)), "vivo": bool(cfg.get("ia_vivo", False))}
+
+
 def local_version():
     try:
         with open(VERSION_FILE, encoding="utf-8") as f:
@@ -501,6 +533,78 @@ class Gestion:
             json.dump(clean, f, indent=1)
         return web.json_response({"ok": True})
 
+    # ---------------------------------------------------------- IA
+
+    async def ia_estado(self, request):
+        loop = asyncio.get_running_loop()
+        gpu = await loop.run_in_executor(None, gpu_nvidia)
+        return web.json_response({"instalada": ia_instalada(), "gpu": gpu, "instalando": self.busy == "ia",
+                                  **ia_config()})
+
+    async def ia_config_set(self, request):
+        data = await request.json()
+        cfg = load_config()
+        if "final" in data:
+            cfg["ia_final"] = bool(data["final"])
+        if "vivo" in data:
+            cfg["ia_vivo"] = bool(data["vivo"])
+        save_config(cfg)
+        return web.json_response({"ok": True, **ia_config()})
+
+    async def ia_instalar(self, request):
+        if self.busy:
+            return web.json_response({"ok": False, "mensaje": "Hay otra instalación en curso"})
+        self.busy = "ia"
+        asyncio.create_task(self._ia_instalar())
+        return web.json_response({"ok": True, "mensaje": "Instalando la IA. El avance se ve en el registro (Visor)."})
+
+    async def _ia_instalar(self):
+        srv = self.server
+        from servidor_levanta import PYTHON, NO_WINDOW, TOOLS
+        try:
+            loop = asyncio.get_running_loop()
+            gpu = await loop.run_in_executor(None, gpu_nvidia)
+            os.makedirs(IA_PAQUETES, exist_ok=True)
+            os.makedirs(IA_MODELOS, exist_ok=True)
+            pip = [PYTHON, "-I", "-m", "pip", "install", "--target", IA_PAQUETES, "--upgrade",
+                   "--no-warn-script-location", "--disable-pip-version-check", "--progress-bar", "off"]
+            if gpu:
+                torch_cmd = pip + [f"torch=={IA_TORCH}", "--index-url", "https://download.pytorch.org/whl/cu124"]
+                await srv.send_status(f"IA: tarjeta {gpu} encontrada. Descargando PyTorch para NVIDIA (~2.5 GB)…")
+            else:
+                torch_cmd = pip + [f"torch=={IA_TORCH}"]
+                await srv.send_status("IA: no hay tarjeta NVIDIA; se instala la versión para procesador (más lenta).")
+            pasos = [
+                ("PyTorch", torch_cmd),
+                ("Transformers", pip + [f"transformers=={IA_TRANSFORMERS}", "huggingface_hub"]),
+                ("modelo Prompt Depth Anything", [PYTHON, "-I", "-c",
+                    "import sys; sys.path.append(r'%s'); from huggingface_hub import snapshot_download; "
+                    "p = snapshot_download('%s', cache_dir=r'%s'); print('Modelo en', p)"
+                    % (IA_PAQUETES, IA_MODELO, IA_MODELOS)]),
+                ("prueba", [PYTHON, "-I", "-c",
+                    "import sys; sys.path.insert(0, r'%s'); import ia_profundidad as I; "
+                    "import torch; print('IA lista:', I.disponible(), '| GPU:', torch.cuda.is_available())" % TOOLS]),
+            ]
+            for nombre, cmd in pasos:
+                await srv.send_status(f"IA: instalando {nombre}…")
+                proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
+                                                            stderr=asyncio.subprocess.STDOUT, creationflags=NO_WINDOW)
+                last = ""
+                async for line in proc.stdout:
+                    t = line.decode("utf-8", "replace").strip()
+                    if t and (t.startswith(("Successfully", "Modelo en", "IA lista", "ERROR", "Downloading torch"))):
+                        await srv.send_status("IA: " + t[:200])
+                    last = t or last
+                await proc.wait()
+                if proc.returncode != 0:
+                    await srv.send_status(f"IA: falló la instalación de {nombre}: {last[:200]}")
+                    return
+            await srv.send_status("IA instalada. Se usará al procesar los escaneos (puedes cambiarlo en Actualizaciones).")
+        except Exception as e:      # noqa: BLE001
+            await srv.send_status(f"IA: no se pudo instalar: {e}")
+        finally:
+            self.busy = None
+
     # ---------------------------------------------------------- actualizar desde un archivo
 
     def _incoming(self):
@@ -726,6 +830,9 @@ class Gestion:
         app.router.add_get("/api/modelo/{carpeta}", self.modelo)
         app.router.add_post("/api/carpeta/elegir", self.carpeta_elegir)
         app.router.add_post("/api/carpeta", self.carpeta_fijar)
+        app.router.add_get("/api/ia", self.ia_estado)
+        app.router.add_post("/api/ia/config", self.ia_config_set)
+        app.router.add_post("/api/ia/instalar", self.ia_instalar)
         app.router.add_get("/api/medidas/{carpeta}", self.medidas_get)
         app.router.add_post("/api/medidas/{carpeta}", self.medidas_set)
         app.router.add_get("/app/info.json", self.app_info)          # visible para el iPhone en la red local

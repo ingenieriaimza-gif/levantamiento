@@ -175,6 +175,17 @@
         <span class="muted">Conecta el iPhone por cable; se abre Sideloadly con la app.</span></div>
       <div class="muted">Cuando el iPhone se conecte al programa y tenga una versión anterior, la app mostrará un aviso.</div>
     </div>
+    <div class="card">
+      <div class="row"><div><div class="muted">Inteligencia artificial (profundidad)</div>
+        <div id="ia-state">Revisando…</div></div></div>
+      <div class="muted">Prompt Depth Anything combina la foto con el LiDAR para dar profundidad de mayor resolución.
+        El LiDAR sigue mandando: la IA solo se acepta donde coincide con lo medido, y si no coincide se descarta.</div>
+      <div class="row">
+        <button class="btn primary" id="ia-install" type="button" hidden>Instalar IA (descarga de ~3 GB)</button>
+        <label><input type="checkbox" id="ia-final"> Usar IA al procesar los escaneos</label>
+        <label><input type="checkbox" id="ia-vivo"> Usar IA en la vista en vivo (experimental)</label>
+      </div>
+    </div>
     <div id="upd-msg" class="muted"></div>
     <div class="card">
       <div class="muted">Cerrar el programa deja de recibir escaneos del iPhone. Para volver a abrirlo usa el acceso directo del escritorio.</div>
@@ -198,7 +209,7 @@ function show(name) {
   tabs.forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
   for (const t of ['visor', 'escaneos', 'actualizaciones']) $('tab-' + t).hidden = t !== name;
   if (name === 'escaneos') loadScans();
-  if (name === 'actualizaciones') { checkUpdates(); showStoredApp(); }
+  if (name === 'actualizaciones') { checkUpdates(); showStoredApp(); loadIA(); }
 }
 tabs.forEach(b => b.onclick = () => show(b.dataset.tab));
 
@@ -609,6 +620,24 @@ async function analyze(file) {
   $('file-install').hidden = !r.puede;
   $('file-install').textContent = r.tipo === 'ipa' ? 'Guardar para el iPhone' : r.tipo === 'exe' ? 'Abrir instalador' : 'Instalar actualización';
 }
+async function loadIA() {
+  const r = await fetch('/api/ia').then(x => x.json()).catch(() => null);
+  if (!r) { $('ia-state').textContent = 'No disponible'; return; }
+  const gpu = r.gpu ? `tarjeta ${r.gpu}` : 'sin tarjeta NVIDIA (sería lenta)';
+  $('ia-state').textContent = r.instalando ? 'Instalando… (ver registro en Visor)'
+    : r.instalada ? `Instalada · ${gpu}` : `No instalada · ${gpu}`;
+  $('ia-install').hidden = r.instalada || r.instalando;
+  $('ia-final').checked = r.final; $('ia-vivo').checked = r.vivo;
+  $('ia-final').disabled = $('ia-vivo').disabled = !r.instalada;
+}
+$('ia-install').onclick = async () => {
+  $('ia-install').disabled = true;
+  const r = await post('/api/ia/instalar');
+  $('upd-msg').textContent = r.mensaje;
+  loadIA();
+};
+$('ia-final').onchange = () => post('/api/ia/config', { final: $('ia-final').checked });
+$('ia-vivo').onchange = () => post('/api/ia/config', { vivo: $('ia-vivo').checked });
 $('to-iphone').onclick = async () => {
   const r = await post('/api/instalar_iphone');
   $('upd-msg').textContent = r.mensaje;

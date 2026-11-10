@@ -86,7 +86,7 @@ def local_ips():
 class Session:
     """Una sesión de escaneo: guarda cuadros en disco y mantiene una fusión en vivo de baja resolución."""
 
-    def __init__(self, root, name, info, live_voxel=0.012, dmax=3.5):
+    def __init__(self, root, name, info, live_voxel=0.012, dmax=3.5, refiner=None):
         self.name = name
         self.dir = os.path.join(root, f"RGBD_{name}")
         os.makedirs(os.path.join(self.dir, "frames"), exist_ok=True)
@@ -105,6 +105,8 @@ class Session:
             voxel_size=live_voxel, block_resolution=8, block_count=20000,
             device=o3c.Device("CPU:0"))
         self.trunc_mult = 4.0
+        self.refiner = refiner          # IA en vivo (opcional)
+        self.ia_fallos = 0
 
     def add_frame(self, h, jpeg, depth, conf):
         i = int(h["i"])
@@ -131,12 +133,24 @@ class Session:
         d = np.frombuffer(depth, dtype="<u2").reshape(dh, dw).copy()
         c = np.frombuffer(conf, dtype=np.uint8).reshape(dh, dw)
         d[c < 1] = 0
-        if len(jpeg):
-            img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
-            col = cv2.cvtColor(cv2.resize(img, (dw, dh), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
+        ow, oh = dw, dh
+        img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR) if len(jpeg) else None
+        if img is not None and self.refiner is not None and self.ia_fallos < 5:
+            try:
+                from ia_profundidad import refinar_cuadro
+                ow, oh = 512, int(round(512 * img.shape[0] / img.shape[1]))
+                d, _ = refinar_cuadro(self.refiner, cv2.cvtColor(img, cv2.COLOR_BGR2RGB), d, c, (ow, oh))
+            except Exception as e:      # noqa: BLE001
+                self.ia_fallos += 1
+                print("IA en vivo falló:", e)
+                ow, oh = dw, dh
+                d = np.frombuffer(depth, dtype="<u2").reshape(dh, dw).copy()
+                d[c < 1] = 0
+        if img is not None:
+            col = cv2.cvtColor(cv2.resize(img, (ow, oh), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
         else:
-            col = np.full((dh, dw, 3), 160, np.uint8)
-        sx, sy = dw / float(h["w"]), dh / float(h["h"])
+            col = np.full((oh, ow, 3), 160, np.uint8)
+        sx, sy = ow / float(h["w"]), oh / float(h["h"])
         K = np.array([[h["fx"] * sx, 0, (h["cx"] + 0.5) * sx - 0.5 + 0.5],
                       [0, h["fy"] * sy, (h["cy"] + 0.5) * sy - 0.5 + 0.5],
                       [0, 0, 1]], dtype=np.float64)        # +0.5: Open3D trunca la proyección
@@ -225,9 +239,10 @@ class Server:
                 if kind == MSG_START:
                     if self.session is None:
                         name = h.get("nombre") or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                        refiner = await self.live_refiner()
                         self.session = Session(self.root, name,
                                                {"device": h.get("dispositivo", "iPhone"),
-                                                "system": h.get("sistema", "")})
+                                                "system": h.get("sistema", "")}, refiner=refiner)
                         self.status.update(cuadros=0, clave=0)
                         await self.send_status(f"Escaneo iniciado: {name}")
                     else:
@@ -270,6 +285,22 @@ class Server:
             await self.send_status("iPhone desconectado (lo recibido está guardado)")
         return ws
 
+    async def live_refiner(self):
+        """Carga la IA para la vista en vivo si está instalada y activada (se carga una sola vez)."""
+        from gestion import ia_config, ia_instalada
+        if not (ia_instalada() and ia_config()["vivo"]):
+            return None
+        if getattr(self, "_refiner", None) is None:
+            await self.send_status("Cargando la IA para la vista en vivo…")
+            try:
+                from ia_profundidad import RefinadorIA
+                self._refiner = await asyncio.get_running_loop().run_in_executor(self.pool, RefinadorIA)
+                await self.send_status(f"IA en vivo lista ({self._refiner.device})")
+            except Exception as e:      # noqa: BLE001
+                await self.send_status(f"No se pudo cargar la IA en vivo: {e}")
+                return None
+        return self._refiner
+
     async def ws_viewer(self, request):
         ws = web.WebSocketResponse(heartbeat=20)
         await ws.prepare(request)
@@ -305,11 +336,16 @@ class Server:
         self.status["procesando"] = True
         out = os.path.join(sdir, "resultado")
         py = PYTHON
+        from gestion import ia_config, ia_instalada
+        usar_ia = ia_instalada() and ia_config()["final"]
+        if usar_ia:
+            await self.send_status("Procesando con IA de profundidad (Prompt Depth Anything)…")
         # -X utf8: salida en UTF-8 aunque Windows use otra codificación por defecto
         cmds = [
             [py, "-I", "-X", "utf8", os.path.join(TOOLS, "procesar_rgbd.py"), sdir, "--salida", out,
              "--voxel", "0.004", "--dmax", "3.5", "--conf", "2", "--lecturas", "2",
-             "--triangulos-textura", "1500000"] + (["--escala", str(escala), "1"] if escala else []),
+             "--triangulos-textura", "1500000"] + (["--escala", str(escala), "1"] if escala else [])
+            + (["--ia"] if usar_ia else []),
             [py, "-I", "-X", "utf8", os.path.join(TOOLS, "exportar_splat.py"), sdir,
              "--salida", os.path.join(sdir, "splat"), "--nube", os.path.join(out, "nube_fusionada.ply")],
         ]
