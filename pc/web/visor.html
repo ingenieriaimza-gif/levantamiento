@@ -307,7 +307,7 @@ function onStatus(s) {
 }
 
 // ---------- avance de "crear el modelo 3D"
-let progress = null, wasProcessing = false, doneAt = null;
+let progress = null, wasProcessing = false, doneAt = null, lastFase = null;
 const mins = (sec) => {
   if (sec == null) return null;
   if (sec < 60) return 'menos de 1 min';
@@ -329,7 +329,7 @@ function progressView(p) {
       el('span', { className: 'prog-pct', textContent: `${pct} %` }),
       el('span', { className: 'prog-time', textContent: time + lleva })),
     el('div', { className: 'prog-bar' }, el('i')),
-    el('div', { className: 'prog-stage', textContent: done ? 'Modelo listo' : p.etapa }));
+    el('div', { className: 'prog-stage', textContent: done ? (p.fase === 'foto' ? 'Vista foto-realista lista' : 'Modelo listo') : p.etapa }));
   box.setAttribute('role', 'progressbar');
   box.setAttribute('aria-valuemin', '0'); box.setAttribute('aria-valuemax', '100'); box.setAttribute('aria-valuenow', String(pct));
   box.querySelector('.prog-bar > i').style.width = `${Math.max(1, pct)}%`;
@@ -343,11 +343,14 @@ function onProgress(p, processing) {
   if (!p || processing) doneAt = null;
   if (p && (processing || recent)) {
     panel.hidden = false;
-    panel.replaceChildren(el('div', { className: 'muted', textContent: `Creando el modelo 3D · ${p.carpeta.replace('RGBD_', '')}` }), progressView(p));
+    panel.replaceChildren(el('div', { className: 'muted', textContent: `${p.fase === 'foto' ? 'Vista foto-realista' : 'Creando el modelo 3D'} · ${p.carpeta.replace('RGBD_', '')}` }), progressView(p));
   } else panel.hidden = true;
   for (const slot of document.querySelectorAll('.prog-slot')) {
     if (p && slot.dataset.carpeta === p.carpeta) slot.replaceChildren(progressView(p));
   }
+  const fase = p && processing ? (p.fase || 'modelo') : null;
+  if (fase !== lastFase && !$('tab-escaneos').hidden && wasProcessing && processing) loadScans();   // pasó a la vista foto-realista
+  lastFase = fase;
   if (wasProcessing && !processing && !$('tab-escaneos').hidden) loadScans();
   wasProcessing = processing;
 }
@@ -650,7 +653,7 @@ async function loadScans() {
 
       if (s.descartado) {
         pills.append(el('span', { className: 'pill', textContent: 'descartado' }));
-      } else if (s.procesando) {
+      } else if (s.procesando && !(s.fase === 'foto' && s.con_modelo)) {
         pills.append(el('span', { className: 'pill warn', textContent: 'creando el modelo 3D…' }));
         const slot = el('div', { className: 'prog-slot' });
         slot.dataset.carpeta = s.carpeta;
@@ -677,6 +680,27 @@ async function loadScans() {
         actions.append(crear('Crear modelo 3D'));
       } else {
         pills.append(el('span', { className: 'pill ok', textContent: 'modelo listo' }));
+        // vista foto-realista (Gaussian Splatting)
+        if (s.procesando && s.fase === 'foto') {
+          pills.append(el('span', { className: 'pill warn', textContent: 'creando la vista foto-realista…' }));
+          const slot = el('div', { className: 'prog-slot' });
+          slot.dataset.carpeta = s.carpeta;
+          if (progress && progress.carpeta === s.carpeta) slot.append(progressView(progress));
+          else slot.append(el('div', { className: 'muted', textContent: 'Empezando…' }));
+          body.append(el('div', { className: 'muted', textContent: 'Los archivos del modelo ya se pueden usar. La vista foto-realista se está entrenando en la tarjeta de video:' }), slot);
+        } else if (s.vista_foto) {
+          pills.append(el('span', { className: 'pill ok', textContent: 'vista foto-realista lista' }));
+        } else {
+          const fb = el('button', { className: 'btn', type: 'button', textContent: 'Crear vista foto-realista' });
+          fb.title = 'Entrena en la tarjeta de video una vista que se ve como las fotos desde cualquier ángulo';
+          fb.onclick = async () => {
+            fb.disabled = true;
+            const r = await post('/api/vista_foto_crear', { carpeta: s.carpeta });
+            if (r.ok) setTimeout(loadScans, 1500); else { fb.textContent = r.mensaje; }
+          };
+          actions.append(fb);
+          if (s.vista_foto_error) body.append(el('div', { className: 'muted', textContent: `Vista foto-realista: ${s.vista_foto_error}` }));
+        }
         const fileRow = (titulo, nota, nombre, etiqueta) => {
           if (!has(nombre)) return null;
           const f = s.archivos.find(x => x.nombre === nombre);

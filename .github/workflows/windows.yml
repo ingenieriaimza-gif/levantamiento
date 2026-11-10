@@ -75,12 +75,14 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $py = "dist\app\python\python.exe"
+          # vista foto-realista: aquí no hay tarjeta de video; se fuerza con pocos pasos solo para probar el camino completo
+          $env:LEVANTA_FOTO_FORZAR = "1"; $env:LEVANTA_FOTO_PASOS = "20"; $env:LEVANTA_FOTO_RES = "320"
           $srv = Start-Process $py -ArgumentList "-I", "dist\app\pc\servidor_levanta.py", "--carpeta", "$PWD\prueba" -PassThru -RedirectStandardOutput srv.log -RedirectStandardError srv.err
           for ($i = 0; $i -lt 60; $i++) { try { Invoke-RestMethod http://localhost:8765/estado | Out-Null; break } catch { Start-Sleep 2 } }
           & $py -I tools\sintetico.py --salida sim\paquete --cuadros 60
           & $py -I pc\simular_iphone.py sim\paquete --fps 15
           $ok = $false
-          for ($i = 0; $i -lt 240; $i++) {
+          for ($i = 0; $i -lt 480; $i++) {
             $s = Invoke-RestMethod http://localhost:8765/estado
             if (-not $s.procesando -and ($s.resultados.Count -gt 0 -or $s.mensaje -like "*falló*")) { $ok = $s.resultados.Count -gt 0; break }
             Start-Sleep 5
@@ -93,6 +95,9 @@ jobs:
             if (-not (Test-Path "$res\$f")) { Write-Error "Falta $f" }
           }
           if (-not (Test-Path "prueba\RGBD_prueba_simulada\splat\sparse\0\images.txt")) { Write-Error "Faltan datos para splat" }
+          if (Test-Path "$res\vista_foto.ply") { "VISTA FOTO-REALISTA: OK ({0:N1} MB)" -f ((Get-Item "$res\vista_foto.ply").Length / 1MB) }
+          else { "VISTA FOTO-REALISTA: NO SE CREO"; Get-Content "$res\vista_foto_error.txt" -ErrorAction SilentlyContinue; Get-Content srv.log -Tail 60 | Select-String "foto|brush|adapter|error" }
+          Remove-Item Env:LEVANTA_FOTO_FORZAR, Env:LEVANTA_FOTO_PASOS, Env:LEVANTA_FOTO_RES -ErrorAction SilentlyContinue
           Stop-Process -Id $srv.Id -Force
           if (-not $ok) { Get-Content srv.err -Tail 40; exit 1 }
 

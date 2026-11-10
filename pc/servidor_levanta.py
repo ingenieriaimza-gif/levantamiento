@@ -425,6 +425,71 @@ class Server:
                                            "etapa": "Listo", "restante_s": 0,
                                            "transcurrido_s": round(time.time() - t0)}
                 await self.send_status(f"Listo. Resultados en {out}")
+                await self.photo_view(sdir)
+        finally:
+            self.status["procesando"] = False
+            await self.send_status()
+
+    async def photo_view(self, sdir):
+        """Vista foto-realista (Gaussian Splatting) en la tarjeta de video. Si falla, el modelo ya quedó listo."""
+        import vista_foto
+        res = os.path.join(sdir, "resultado")
+        err_path = os.path.join(res, "vista_foto_error.txt")
+        try:
+            os.remove(err_path)
+        except OSError:
+            pass
+        carpeta = os.path.basename(sdir)
+        if not vista_foto.disponible():
+            with open(err_path, "w", encoding="utf-8") as f:
+                f.write("Esta PC no tiene tarjeta de video NVIDIA: la vista foto-realista tardaría horas.\n")
+            return
+        t0 = time.time()
+        state = {"sent": 0.0, "rest": None}
+        self.status["fase"] = "foto"
+
+        def on(frac, etapa):
+            el = time.time() - t0
+            rest = el / frac - el if frac > 0.05 else None
+            if rest is not None and state["rest"] is not None:
+                rest = 0.8 * state["rest"] + 0.2 * rest
+            state["rest"] = rest
+            self.status["progreso"] = {"carpeta": carpeta, "fraccion": round(frac, 4), "etapa": etapa, "fase": "foto",
+                                       "restante_s": None if rest is None else round(rest),
+                                       "transcurrido_s": round(el)}
+            if time.time() - state["sent"] > 1.0:
+                state["sent"] = time.time()
+                asyncio.ensure_future(self.send_status())
+
+        try:
+            on(0.0, "Preparando la vista foto-realista")
+            await self.send_status("Creando la vista foto-realista (los archivos del modelo ya se pueden usar)…")
+            await vista_foto.entrenar(sdir, on)
+            self.status["progreso"] = {"carpeta": carpeta, "fraccion": 1.0, "etapa": "Listo", "fase": "foto",
+                                       "restante_s": 0, "transcurrido_s": round(time.time() - t0)}
+            await self.send_status("Vista foto-realista lista: ábrela en Revisar 3D")
+        except Exception as e:      # noqa: BLE001
+            with open(err_path, "w", encoding="utf-8") as f:
+                f.write(f"{e}\n")
+            self.status["progreso"] = None
+            await self.send_status(f"No se pudo crear la vista foto-realista: {e}")
+        finally:
+            self.status["fase"] = None
+
+    async def only_photo_view(self, sdir):
+        """Crea solo la vista foto-realista de un escaneo que ya tiene modelo."""
+        self.status["procesando"] = True
+        self.processing_dir = sdir
+        try:
+            if not os.path.isdir(os.path.join(sdir, "splat", "sparse", "0")):
+                await self.send_status("Preparando las fotos para la vista foto-realista…")
+                cmd = [PYTHON, "-I", "-X", "utf8", os.path.join(TOOLS, "exportar_splat.py"), sdir,
+                       "--salida", os.path.join(sdir, "splat"),
+                       "--nube", os.path.join(sdir, "resultado", "nube_fusionada.ply")]
+                proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.DEVNULL,
+                                                            stderr=asyncio.subprocess.DEVNULL, creationflags=NO_WINDOW)
+                await proc.wait()
+            await self.photo_view(sdir)
         finally:
             self.status["procesando"] = False
             await self.send_status()

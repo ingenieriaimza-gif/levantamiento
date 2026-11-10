@@ -7,3 +7,4 @@ xcodebuild.log
 node_modules/
 __pycache__/
 *.pyc
+motor_foto/

@@ -335,6 +335,9 @@ class Gestion:
                     "procesando": bool(processing),
                     "con_modelo": any(f["nombre"] == "malla_solidworks.stl" for f in files),
                     "error": _first_line(os.path.join(res, "error.txt")),
+                    "fase": self.server.status.get("fase") if processing else None,
+                    "vista_foto": os.path.exists(os.path.join(res, "vista_foto.ply")),
+                    "vista_foto_error": _first_line(os.path.join(res, "vista_foto_error.txt")),
                     "nombre": name.replace("RGBD_", ""),
                     "carpeta": name,
                     "fecha": datetime.fromtimestamp(os.path.getmtime(d)).strftime("%Y-%m-%d %H:%M"),
@@ -565,6 +568,19 @@ class Gestion:
         if not os.path.exists(p):
             raise web.HTTPNotFound(text="Este escaneo no tiene vista foto-realista")
         return web.FileResponse(p)
+
+    async def vista_foto_crear(self, request):
+        data = await request.json()
+        d = self._safe(data.get("carpeta", ""))
+        if self.server.status.get("procesando"):
+            return web.json_response({"ok": False, "mensaje": "La PC está ocupada con otro escaneo; espera a que termine"})
+        if not os.path.exists(os.path.join(d, "resultado", "nube_fusionada.ply")):
+            return web.json_response({"ok": False, "mensaje": "Primero hay que crear el modelo 3D"})
+        import vista_foto
+        if not vista_foto.disponible():
+            return web.json_response({"ok": False, "mensaje": "Esta PC no tiene tarjeta de video NVIDIA"})
+        asyncio.ensure_future(self.server.only_photo_view(d))
+        return web.json_response({"ok": True})
 
     async def medidas_get(self, request):
         d = self._safe(request.match_info["carpeta"])
@@ -896,6 +912,7 @@ class Gestion:
         app.router.add_post("/api/instalar_iphone", self.instalar_iphone)
         app.router.add_get("/api/modelo/{carpeta}", self.modelo)
         app.router.add_route("*", "/api/vista_foto/{carpeta}", self.vista_foto)
+        app.router.add_post("/api/vista_foto_crear", self.vista_foto_crear)
         app.router.add_post("/api/carpeta/elegir", self.carpeta_elegir)
         app.router.add_post("/api/carpeta", self.carpeta_fijar)
         app.router.add_get("/api/ia", self.ia_estado)

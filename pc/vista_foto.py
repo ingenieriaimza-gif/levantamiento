@@ -29,9 +29,15 @@ URL = f"https://github.com/ArthurBrussee/brush/releases/download/{VERSION}/{ARCH
 NO_WINDOW = 0x08000000 if WINDOWS else 0
 
 # Configuración fija (pensada para una RTX 4060 de 8 GB)
-PASOS = 12000            # pasos de entrenamiento
-MAX_RESOLUCION = 1600    # lado largo de las fotos al entrenar
-MAX_SPLATS = 2_500_000   # tope de "manchas": cabe en 8 GB y se mueve fluido en el visor
+PASOS = int(os.environ.get("LEVANTA_FOTO_PASOS", "12000"))          # pasos de entrenamiento
+MAX_RESOLUCION = int(os.environ.get("LEVANTA_FOTO_RES", "1600"))    # lado largo de las fotos al entrenar
+MAX_SPLATS = 2_000_000   # tope de "manchas": cabe en 8 GB y se mueve fluido en el visor
+GRADO_SH = 1             # reflejos según el ángulo: 1 basta en interiores y el archivo pesa 3 veces menos
+
+
+def disponible():
+    """True si esta PC puede entrenar en un tiempo razonable (tarjeta dedicada)."""
+    return bool(os.environ.get("LEVANTA_FOTO_FORZAR")) or gpu() is not None
 
 
 def motor_exe():
@@ -90,7 +96,7 @@ def descargar_motor(avance=None):
 
 def comando(exe, datos, salida_dir, nombre, pasos=PASOS, max_res=MAX_RESOLUCION, max_splats=MAX_SPLATS):
     return [exe, datos, "--total-steps", str(pasos), "--max-resolution", str(max_res),
-            "--max-splats", str(max_splats), "--export-every", str(pasos),
+            "--max-splats", str(max_splats), "--sh-degree", str(GRADO_SH), "--export-every", str(pasos),
             "--export-path", salida_dir, "--export-name", nombre]
 
 
@@ -144,8 +150,11 @@ async def entrenar(sdir, on_avance, pasos=PASOS, max_res=MAX_RESOLUCION, on_line
     ply = os.path.join(tmp, "vista_foto.ply")
     if proc.returncode != 0 or not os.path.exists(ply):
         shutil.rmtree(tmp, ignore_errors=True)
-        detalle = " | ".join(ultimas[-4:])[-600:]
-        raise RuntimeError(f"el entrenamiento terminó con error (código {proc.returncode}). {detalle}")
+        clave = [x for x in ultimas if "panicked" in x or "rror" in x]
+        detalle = (clave[0] if clave else " | ".join(ultimas[-3:]))[-300:]
+        if "adapter" in " ".join(ultimas).lower() or "unwrap_failed" in " ".join(ultimas):
+            detalle = "la tarjeta de video no respondió (actualiza el controlador de video e intenta de nuevo). " + detalle
+        raise RuntimeError(f"el entrenamiento se detuvo (código {proc.returncode}): {detalle}")
     os.makedirs(res, exist_ok=True)
     final = os.path.join(res, "vista_foto.ply")
     os.replace(ply, final)
