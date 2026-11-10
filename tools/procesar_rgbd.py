@@ -280,20 +280,10 @@ def clean_mesh(mesh, min_triangles):
 
 
 def acabado(mesh):
-    """Superficies más reales: suavizado Taubin (quita la ondulación del LiDAR sin encoger) y
-    relleno de huecos chicos (hasta ~3 cm). En la escena de prueba no cambia la exactitud
-    (mediana 1.2 mm) y baja el error del 95 % de 6.3 a 5.9 mm."""
+    """Superficies más reales: suavizado Taubin (quita la ondulación del LiDAR sin encoger).
+    En la escena de prueba no cambia la mediana (1.2 mm) y baja el error del 95 % de 6.3 a 5.9 mm.
+    (El relleno de huecos de Open3D se probó, pero en Windows cierra el programa: no se usa.)"""
     mesh = mesh.filter_smooth_taubin(number_of_iterations=10)
-    try:
-        filled = o3d.t.geometry.TriangleMesh.from_legacy(mesh).fill_holes(hole_size=0.03).to_legacy()
-        # el relleno solo agrega triángulos entre vértices existentes, pero Open3D devuelve los colores
-        # dañados: se conservan vértices y colores originales y solo se toman los triángulos nuevos
-        if len(filled.vertices) == len(mesh.vertices) and len(filled.triangles) >= len(mesh.triangles):
-            mesh.triangles = filled.triangles
-        else:
-            log("  (relleno de huecos omitido: cambió los vértices)")
-    except Exception as e:      # noqa: BLE001 — si esta versión de Open3D no puede, se sigue sin rellenar
-        log(f"  (sin relleno de huecos: {e})")
     mesh.compute_vertex_normals()
     return mesh
 
