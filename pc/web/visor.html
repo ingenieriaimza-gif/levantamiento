@@ -127,6 +127,7 @@
     <button class="btn" id="top-view" type="button">Planta</button>
   </div>
   <div id="viewing" class="panel" hidden><span id="viewing-name"></span>
+    <button class="btn mini" id="look-btn" type="button" hidden>Ver la malla</button>
     <button class="btn mini" id="back-live" type="button">Volver a en vivo</button></div>
   <div id="meas" class="panel">
     <h3>Medidas</h3>
@@ -217,6 +218,7 @@
 import * as THREE from './web/three.module.min.js';
 import { OrbitControls } from './web/OrbitControls.js';
 import { GLTFLoader } from './web/GLTFLoader.js';
+import * as GS3D from './web/gaussian-splats-3d.module.js';
 
 const $ = (id) => document.getElementById(id);
 const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Levanta': '1' },
@@ -545,6 +547,7 @@ async function openScan(carpeta, nombre) {
     });
     scene.add(model);
     viewing = carpeta;
+    loadPhotoView(carpeta);
     if (mesh) mesh.visible = false;
     $('viewing').hidden = false; $('viewing-name').textContent = `Revisar 3D · ${nombre}`;
     $('measure-btn').hidden = false; $('review-btn').hidden = true;
@@ -553,7 +556,40 @@ async function openScan(carpeta, nombre) {
     renderList(); drawMeasures(); fit(); setHint(measuring ? 'Clic en el primer punto' : '');
   }, undefined, () => setHint('No se pudo abrir el modelo de este escaneo.'));
 }
+// ---------- vista foto-realista (Gaussian Splatting): se ve como las fotos; se mide sobre la malla
+let splat = null, photoLook = true;
+function removePhotoView() {
+  if (splat) { scene.remove(splat); try { splat.dispose(); } catch (e) { /* ya liberado */ } splat = null; }
+  $('look-btn').hidden = true;
+}
+function applyLook() {
+  if (splat) splat.visible = photoLook;
+  if (model) model.visible = !(splat && photoLook);      // oculta, la malla sigue sirviendo para medir
+  $('look-btn').textContent = photoLook ? 'Ver la malla' : 'Ver foto-realista';
+}
+async function loadPhotoView(carpeta) {
+  removePhotoView();
+  const url = '/api/vista_foto/' + encodeURIComponent(carpeta);
+  try {
+    const head = await fetch(url, { method: 'HEAD' });
+    if (!head.ok || viewing !== carpeta) return;
+    setHint('Cargando la vista foto-realista…');
+    const v = new GS3D.DropInViewer({ gpuAcceleratedSort: false, sharedMemoryForWorkers: false,
+      sphericalHarmonicsDegree: 1, antialiased: true, sceneRevealMode: GS3D.SceneRevealMode.Instant });
+    await v.addSplatScene(url, { format: GS3D.SceneFormat.Ply, showLoadingUI: false, splatAlphaRemovalThreshold: 5 });
+    if (viewing !== carpeta) { try { v.dispose(); } catch (e) { /* nada */ } return; }
+    splat = v; scene.add(splat);
+    $('look-btn').hidden = false; photoLook = true; applyLook();
+    setHint(measuring ? 'Clic en el primer punto' : '');
+  } catch (e) {
+    console.warn('vista foto-realista', e);
+    setHint(measuring ? 'Clic en el primer punto' : '');
+  }
+}
+$('look-btn').onclick = () => { photoLook = !photoLook; applyLook(); };
+
 $('back-live').onclick = () => {
+  removePhotoView();
   if (model) { scene.remove(model); model = null; }
   viewing = 'vivo'; $('viewing').hidden = true;
   if (mesh) mesh.visible = true;

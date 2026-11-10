@@ -558,6 +558,14 @@ class Gestion:
             raise web.HTTPNotFound(text="Este escaneo no tiene modelo procesado")
         return web.FileResponse(p)
 
+    async def vista_foto(self, request):
+        """Vista foto-realista (Gaussian Splatting) del escaneo, si ya se entrenó."""
+        d = self._safe(request.match_info["carpeta"])
+        p = os.path.join(d, "resultado", "vista_foto.ply")
+        if not os.path.exists(p):
+            raise web.HTTPNotFound(text="Este escaneo no tiene vista foto-realista")
+        return web.FileResponse(p)
+
     async def medidas_get(self, request):
         d = self._safe(request.match_info["carpeta"])
         out = {"escala": 1.0, "medidas": []}
@@ -887,6 +895,7 @@ class Gestion:
         app.router.add_get("/api/ultima", self.ultima)
         app.router.add_post("/api/instalar_iphone", self.instalar_iphone)
         app.router.add_get("/api/modelo/{carpeta}", self.modelo)
+        app.router.add_route("*", "/api/vista_foto/{carpeta}", self.vista_foto)
         app.router.add_post("/api/carpeta/elegir", self.carpeta_elegir)
         app.router.add_post("/api/carpeta", self.carpeta_fijar)
         app.router.add_get("/api/ia", self.ia_estado)

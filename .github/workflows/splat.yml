@@ -5,19 +5,22 @@ on:
     branches: [main]
     paths:
       - "tools/exportar_splat.py"
+      - "pc/vista_foto.py"
       - ".github/workflows/splat.yml"
   workflow_dispatch:
     inputs:
       pasos:
         description: "pasos de entrenamiento"
-        default: "1500"
+        default: "400"
 
 jobs:
   splat:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    permissions:
+      contents: write
     env:
-      PASOS: ${{ github.event.inputs.pasos || '1500' }}
+      PASOS: ${{ github.event.inputs.pasos || '400' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,38 +32,22 @@ jobs:
           vulkaninfo --summary | grep -E "deviceName|deviceType" || true
           python -m pip install --upgrade pip -q
           python -m pip install -r pc/requirements.txt -q
-      - name: Motor (Brush 0.3.0)
+      - name: Escena simulada y exportación
+        run: |
+          mkdir -p sim/esc && cd sim
+          python -I ../tools/sintetico.py --salida esc/paquete --cuadros 60
+          python -I ../tools/procesar_rgbd.py esc/paquete --salida esc/resultado --conf 2 --lecturas 2 --sin-textura | grep -v PROGRESO | tail -3
+          python -I ../tools/exportar_splat.py esc/paquete --salida esc/splat --nube esc/resultado/nube_fusionada.ply
+      - name: Entrenar con el código del programa (descarga el motor)
+        run: |
+          export LEVANTA_FOTO_EXTRA="--eval-split-every 8 --eval-every $PASOS --eval-save-to-disk"
+          /usr/bin/time -v timeout 100m python pc/vista_foto.py sim/esc $PASOS 480 2>&1 | grep -v -E "load_scene_img|Tuning|Saving eval" | cut -c1-200 | tail -60
+          ls -la sim/esc/resultado
+      - name: Publicar resultado de la prueba
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mkdir motor && cd motor
-          gh release view v0.3.0 -R ArthurBrussee/brush --json assets -q '.assets[] | "\(.name) \(.size)"'
-          gh release download v0.3.0 -R ArthurBrussee/brush -p '*x86_64-unknown-linux-gnu*'
-          ls -la
-          for f in *.tar.xz; do tar -xf "$f"; done
-          find . -type f | head -20
-          B=$(find . -type f -name 'brush_app*' | head -1); chmod +x "$B"; echo "BRUSH=$PWD/$B" >> $GITHUB_ENV
-          "$B" --help | head -80
-      - name: Escena simulada y exportación
-        run: |
-          mkdir -p sim && cd sim
-          python -I ../tools/sintetico.py --salida paquete --cuadros 60
-          python -I ../tools/procesar_rgbd.py paquete --salida res --conf 2 --lecturas 2 --sin-textura | grep -v PROGRESO | tail -3
-          python -I ../tools/exportar_splat.py paquete --salida splat --nube res/nube_fusionada.ply
-          ls splat splat/sparse/0; head -3 splat/sparse/0/cameras.txt; sed -n 3,4p splat/sparse/0/images.txt; wc -l splat/sparse/0/points3D.txt
-      - name: Entrenar
-        run: |
-          cd sim
-          export RUST_LOG=info
-          /usr/bin/time -v timeout 100m "$BRUSH" splat --total-steps $PASOS --max-resolution 480 \
-            --eval-split-every 8 --eval-every 500 --eval-save-to-disk \
-            --export-every $PASOS --export-path "$PWD/salida" --export-name modelo.ply 2>&1 | grep -v "^\s*$" | tail -80
-          find salida -type f | head -40; du -sh salida
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: splat-prueba
-          path: |
-            sim/salida
-            sim/splat/sparse
-          retention-days: 5
+          cd sim/esc
+          (cd splat_entrenando 2>/dev/null && zip -qr ../eval.zip . ) || true
+          gh release delete prueba-splat -y --cleanup-tag 2>/dev/null || true
+          gh release create prueba-splat --prerelease --title "Prueba de vista foto-realista" --notes "Resultado de la prueba automática (escena simulada)." resultado/vista_foto.ply $(ls eval.zip 2>/dev/null)
