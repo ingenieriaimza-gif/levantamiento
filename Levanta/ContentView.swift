@@ -324,44 +324,108 @@ struct SettingsView: View {
 
 struct ScansView: View {
     @State private var scans: [URL] = []
+    @State private var toDelete: URL?
+    @State private var confirmAll = false
+    @State private var error: String?
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             List {
                 if scans.isEmpty {
-                    Text("Aún no hay escaneos guardados.")
+                    Text("Aún no hay escaneos guardados en el iPhone.")
                         .foregroundStyle(.secondary)
-                }
-                ForEach(scans, id: \.self) { url in
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(url.deletingPathExtension().lastPathComponent)
-                                .font(.subheadline.weight(.medium))
-                            Text(ScanStore.sizeText(url))
-                                .font(.caption.monospaced())
-                                .foregroundStyle(.secondary)
+                } else {
+                    Section {
+                        ForEach(scans, id: \.self) { url in
+                            HStack(spacing: 14) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(url.deletingPathExtension().lastPathComponent)
+                                        .font(.subheadline.weight(.medium))
+                                    Text(ScanStore.sizeText(url))
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                ShareLink(item: url) {
+                                    Image(systemName: "square.and.arrow.up")
+                                        .frame(width: 36, height: 36)
+                                }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Compartir")
+                                Button(role: .destructive) {
+                                    toDelete = url
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .frame(width: 36, height: 36)
+                                        .foregroundStyle(.red)
+                                }
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("Borrar")
+                            }
                         }
-                        Spacer()
-                        ShareLink(item: url) {
-                            Image(systemName: "square.and.arrow.up")
+                        .onDelete { idx in
+                            for i in idx { remove(scans[i]) }
                         }
+                    } footer: {
+                        Text("Ocupan \(totalText) en el iPhone. Si ya los procesaste en la PC, puedes borrarlos aquí; en la PC se conservan.")
                     }
                 }
-                .onDelete { idx in
-                    for i in idx { try? FileManager.default.removeItem(at: scans[i]) }
-                    scans = ScanStore.list()
+                if let error {
+                    Text(error).font(.footnote).foregroundStyle(.red)
                 }
             }
             .navigationTitle("Mis escaneos")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    if !scans.isEmpty {
+                        Button("Borrar todos", role: .destructive) { confirmAll = true }
+                            .tint(.red)
+                    }
+                }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Cerrar") { dismiss() }
                 }
             }
+            .confirmationDialog("¿Borrar este escaneo del iPhone?",
+                                isPresented: Binding(get: { toDelete != nil }, set: { if !$0 { toDelete = nil } }),
+                                titleVisibility: .visible) {
+                Button("Borrar", role: .destructive) {
+                    if let u = toDelete { remove(u) }
+                    toDelete = nil
+                }
+                Button("Cancelar", role: .cancel) { toDelete = nil }
+            } message: {
+                Text(toDelete?.lastPathComponent ?? "")
+            }
+            .confirmationDialog("¿Borrar todos los escaneos del iPhone?", isPresented: $confirmAll,
+                                titleVisibility: .visible) {
+                Button("Borrar \(scans.count) escaneos", role: .destructive) {
+                    for u in scans { remove(u, reload: false) }
+                    scans = ScanStore.list()
+                }
+                Button("Cancelar", role: .cancel) {}
+            } message: {
+                Text("Los que ya están en la PC se conservan allá.")
+            }
             .onAppear { scans = ScanStore.list() }
         }
+    }
+
+    private var totalText: String {
+        let bytes = scans.reduce(0) { $0 + ((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+        return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+    }
+
+    private func remove(_ url: URL, reload: Bool = true) {
+        do {
+            try FileManager.default.removeItem(at: url)
+            error = nil
+        } catch {
+            self.error = "No se pudo borrar \(url.lastPathComponent): \(error.localizedDescription)"
+        }
+        if reload { scans = ScanStore.list() }
     }
 }
 
