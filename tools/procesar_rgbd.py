@@ -55,8 +55,9 @@ def progreso(frac, etapa):
 
 # avance total de este script (el programa de la PC deja el 4 % final para el Gaussian Splatting)
 # (pesos medidos en una corrida real: la malla y el modelo con fotos son lo más tardado)
-ETAPAS = {"carga": (0.00, 0.01), "nitidez": (0.01, 0.03), "fusion": (0.03, 0.10), "malla": (0.10, 0.18),
-          "detalle": (0.18, 0.22), "completo": (0.22, 0.32), "fotos": (0.32, 0.90), "exportar": (0.90, 1.00)}
+ETAPAS = {"carga": (0.00, 0.01), "nitidez": (0.01, 0.03), "fusion": (0.03, 0.08), "alinear": (0.08, 0.12),
+          "fusion2": (0.12, 0.16), "malla": (0.16, 0.22), "detalle": (0.22, 0.25), "completo": (0.25, 0.33),
+          "fotos": (0.33, 0.90), "exportar": (0.90, 1.00)}
 
 
 def avance(etapa, f, texto):
@@ -268,9 +269,10 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
                                                               trunc_voxel_multiplier=trunc_mult)
                 vbg.integrate(coords, dimg, cimg, Kt, Et, 1000.0, dmax, trunc_voxel_multiplier=trunc_mult)
                 n_ok += 1
-            if n % 5 == 0 and etapa in ("fusion", "completo"):
+            if n % 5 == 0 and etapa in ("fusion", "fusion2", "completo"):
                 avance(etapa, 0.85 * (n + 1) / len(used),
                        f"Uniendo cuadros {n + 1} de {len(used)}" if etapa == "fusion"
+                       else f"Uniendo de nuevo con la deriva corregida ({n + 1} de {len(used)})" if etapa == "fusion2"
                        else f"Completando zonas difíciles ({n + 1} de {len(used)})")
             if (n + 1) % 50 == 0:
                 log(f"  {n + 1}/{len(used)} cuadros fusionados ({time.time() - t0:.0f} s)")
@@ -426,17 +428,30 @@ def acabado(mesh):
     return taubin_paralelo(mesh, 10, log=log)          # todos los núcleos, mismo resultado
 
 
-def solo_lo_nuevo(completa, exacta, cerca=0.010, min_triangles=60):
-    """De la malla completa (confianza media) deja solo lo que la malla exacta no tiene: los triángulos
-    con algún vértice a más de `cerca` de la exacta. Así, donde hay datos de alta confianza el modelo
-    con fotos usa la geometría exacta (para medir), y lo demás solo rellena."""
+def solo_lo_nuevo(completa, exacta, cerca=0.010, capa=0.04, min_triangles=60):
+    """De la malla completa (confianza media) deja solo lo que la malla exacta no tiene, para rellenar huecos.
+    Un triángulo se agrega si está a más de `cerca` de la exacta Y no hay superficie exacta delante o detrás
+    (a lo largo de su normal) a menos de `capa`. Sin esa segunda condición, las lecturas de confianza media
+    —que pueden quedar 1–3 cm corridas— agregaban una COPIA de superficies que ya existían (una puerta
+    doble a 2 cm), y los visores mostraban manchas al no saber cuál capa va delante."""
     if len(exacta.triangles) == 0:
         return completa
     sc = o3d.t.geometry.RaycastingScene()
     sc.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(exacta))
-    d = sc.compute_distance(o3d.core.Tensor(np.asarray(completa.vertices).astype(np.float32))).numpy()
+    Vc = np.asarray(completa.vertices)
+    d = sc.compute_distance(o3d.core.Tensor(Vc.astype(np.float32))).numpy()
     F = np.asarray(completa.triangles)
-    keep = (d[F] > cerca).any(1)
+    keep = (d[F] > cerca).all(1)
+    idx = np.nonzero(keep)[0]
+    if len(idx):
+        a, b, c = Vc[F[idx, 0]], Vc[F[idx, 1]], Vc[F[idx, 2]]
+        cen = (a + b + c) / 3
+        n = np.cross(b - a, c - a)
+        n /= np.maximum(np.linalg.norm(n, axis=1), 1e-12)[:, None]
+        rays = np.concatenate([np.c_[cen, n], np.c_[cen, -n]]).astype(np.float32)
+        t = sc.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy()
+        doble = (t[:len(idx)] < capa) | (t[len(idx):] < capa)
+        keep[idx[doble]] = False
     out = o3d.geometry.TriangleMesh(completa)
     out.remove_triangles_by_mask(~keep)
     out.remove_unreferenced_vertices()
@@ -483,6 +498,7 @@ def main():
     ap.add_argument("--pagina-textura", type=int, default=4096, help="tamaño de cada página de textura")
     ap.add_argument("--escala-textura", type=float, default=1.0,
                     help="reduce las fotos en la textura (p. ej. 0.5 para un modelo ligero para el iPhone)")
+    ap.add_argument("--sin-alinear", action="store_true", help="no corregir la deriva del iPhone")
     ap.add_argument("--todos-los-archivos", action="store_true",
                     help="además de FBX y 3MF: nube PLY/E57, malla PLY, STL y OBJ (tarda más)")
     args = ap.parse_args()
@@ -508,7 +524,6 @@ def main():
                 log(f"IA de profundidad activa ({ia.device})")
         vbg, used, dropped = fuse(meta, frames, args.voxel, trunc, args.dmax, args.conf,
                                   not args.sin_filtro_borrosas, ia=ia, ia_width=args.ia_ancho)
-        del ia
         log(f"Fusionados {used} cuadros ({dropped} descartados por borrosos)")
 
         avance("malla", 0, "Formando las superficies")
@@ -516,6 +531,29 @@ def main():
         del vbg                                   # liberar el volumen antes de texturizar
         import gc
         gc.collect()
+        rondas = int(os.environ.get("LEVANTA_RONDAS_ALINEAR", "2"))
+        for ronda in range(rondas if not args.sin_alinear and len(frames) >= 20 else 0):
+            if not len(mesh.triangles):
+                break
+            # corregir la deriva del iPhone (evita superficies dobles) y volver a unir los cuadros;
+            # la segunda vuelta alinea contra el modelo ya corregido (más nítido)
+            from alinear import refinar_poses
+            ref = clean_mesh(mesh, min_triangles=400)
+            n_corr = refinar_poses(meta, frames, ref, ARKIT_TO_CV,
+                                   avance=lambda f, t: avance("alinear", (ronda + f) / rondas, t), log=log)
+            del ref
+            if not n_corr:
+                break
+            with open(os.path.join(args.salida, "poses_corregidas.json"), "w") as f:
+                json.dump({"/".join(fr["depth"].replace("\\", "/").split("/")[-3:]): fr["T"]
+                           for k, fr in enumerate(frames)}, f)
+            vbg, used, dropped = fuse(meta, frames, args.voxel, trunc, args.dmax, args.conf,
+                                      not args.sin_filtro_borrosas, ia=ia, ia_width=args.ia_ancho,
+                                      etapa="fusion2")
+            avance("malla", 0, "Formando las superficies")
+            mesh, pcd = extract(vbg, args.lecturas)
+            del vbg
+            gc.collect()
         scale = 1.0
         if args.escala:
             real, measured = args.escala
