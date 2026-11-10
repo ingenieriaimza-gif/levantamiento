@@ -19,8 +19,45 @@ enum FrameCodec {
         return ciContext.jpegRepresentation(of: ci, colorSpace: space, options: [key: quality])
     }
 
+    /// Máscara de personas (IA de ARKit en el chip del iPhone) a la resolución w×h, agrandada `grow`
+    /// píxeles para cubrir el contorno. Devuelve nil si no hay personas en el cuadro.
+    static func personMask(_ frame: ARFrame, w: Int, h: Int, grow: Int = 3) -> [Bool]? {
+        guard let seg = frame.segmentationBuffer else { return nil }
+        CVPixelBufferLockBaseAddress(seg, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(seg, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(seg) else { return nil }
+        let sw = CVPixelBufferGetWidth(seg)
+        let sh = CVPixelBufferGetHeight(seg)
+        let row = CVPixelBufferGetBytesPerRow(seg)
+        var m = [Bool](repeating: false, count: w * h)
+        var any = false
+        for v in 0..<h {
+            let sv = min(sh - 1, (v * sh) / h)
+            let p = base.advanced(by: sv * row).assumingMemoryBound(to: UInt8.self)
+            for u in 0..<w {
+                if p[min(sw - 1, (u * sw) / w)] > 0 { m[v * w + u] = true; any = true }
+            }
+        }
+        guard any else { return nil }
+        // dilatación separable (horizontal y vertical)
+        var tmp = m
+        for v in 0..<h {
+            for u in 0..<w where m[v * w + u] {
+                for k in max(0, u - grow)...min(w - 1, u + grow) { tmp[v * w + k] = true }
+            }
+        }
+        var out = tmp
+        for v in 0..<h {
+            for u in 0..<w where tmp[v * w + u] {
+                for k in max(0, v - grow)...min(h - 1, v + grow) { out[k * w + u] = true }
+            }
+        }
+        return out
+    }
+
     /// Profundidad en milímetros (UInt16 little-endian) y confianza (UInt8), fila por fila.
-    static func depthAndConfidence(_ depth: ARDepthData) -> (depth: Data, conf: Data, w: Int, h: Int)? {
+    /// Donde `mask` es true (personas) se deja sin dato.
+    static func depthAndConfidence(_ depth: ARDepthData, mask: [Bool]? = nil) -> (depth: Data, conf: Data, w: Int, h: Int)? {
         let dMap = depth.depthMap
         guard let cMap = depth.confidenceMap else { return nil }
         CVPixelBufferLockBaseAddress(dMap, .readOnly)
@@ -43,11 +80,12 @@ enum FrameCodec {
             for u in 0..<w {
                 let d = dp[u]
                 var mm: UInt16 = 0
-                if d.isFinite && d > 0 && d < 65 { mm = UInt16((d * 1000).rounded()) }
+                let masked = mask?[v * w + u] ?? false
+                if !masked && d.isFinite && d > 0 && d < 65 { mm = UInt16((d * 1000).rounded()) }
                 let o = (v * w + u) * 2
                 dBytes[o] = UInt8(mm & 0xff)
                 dBytes[o + 1] = UInt8(mm >> 8)
-                cBytes[v * w + u] = cp[u]
+                cBytes[v * w + u] = masked ? 0 : cp[u]
             }
         }
         return (Data(dBytes), Data(cBytes), w, h)

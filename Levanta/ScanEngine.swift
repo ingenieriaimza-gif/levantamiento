@@ -41,6 +41,17 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     @Published var highConfidenceOnly = true
     @Published var minObservations: Int = 2
     @Published var smoothDepth = false
+    /// Quitar personas en tiempo real (segmentación con IA de ARKit, en el chip del iPhone).
+    @Published var removePeople = true {
+        didSet {
+            let on = removePeople
+            queue.async { self.activeRemovePeople = on }
+            startSession(reset: false)
+        }
+    }
+    /// Hay una persona frente a la cámara y se está ignorando.
+    @Published var personInView = false
+    @Published var peopleRemovalAvailable = true
     /// Guardar cuadros RGB-D (foto + profundidad + posición) para la fusión de alta calidad.
     @Published var recordRGBD = true
     @Published var keyframeCount = 0
@@ -74,6 +85,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var activeMinConfidence: UInt8 = 2
     private var activeMinObs: UInt16 = 2
     private var activeSmooth = false
+    private var activeRemovePeople = true
+    private var personState = false
+    private var personFrames = 0
     private let recorder = KeyframeRecorder()
     private var activeRecordRGBD = true
     private var tracking = false
@@ -132,6 +146,15 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         } else {
             lidarAvailable = false
             statusMessage = "Este dispositivo no tiene LiDAR."
+        }
+        let peopleSemantics: ARConfiguration.FrameSemantics = [.sceneDepth, .personSegmentationWithDepth]
+        if removePeople {
+            if ARWorldTrackingConfiguration.supportsFrameSemantics(peopleSemantics) {
+                config.frameSemantics.insert(.personSegmentationWithDepth)
+                peopleRemovalAvailable = true
+            } else {
+                peopleRemovalAvailable = false
+            }
         }
         config.worldAlignment = .gravity
         let options: ARSession.RunOptions = reset ? [.resetTracking, .removeExistingAnchors] : []
@@ -220,13 +243,18 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         guard scanning, tracking else { return }
         guard frame.timestamp - lastProcessTime >= processInterval else { return }
         lastProcessTime = frame.timestamp
-        integrate(frame)
-        updateMotion(frame)
         let chosen = activeSmooth ? (frame.smoothedSceneDepth ?? frame.sceneDepth)
                                   : (frame.sceneDepth ?? frame.smoothedSceneDepth)
+        var mask: [Bool]?
+        if activeRemovePeople, let dm = chosen?.depthMap {
+            mask = FrameCodec.personMask(frame, w: CVPixelBufferGetWidth(dm), h: CVPixelBufferGetHeight(dm))
+        }
+        updatePersonIndicator(mask != nil)
+        integrate(frame, mask: mask)
+        updateMotion(frame)
         var savedKeyframe = false
         if activeRecordRGBD && recorder.isActive, let depth = chosen,
-           recorder.consider(frame: frame, depth: depth) {
+           recorder.consider(frame: frame, depth: depth, mask: mask) {
             savedKeyframe = true
             let n = recorder.count
             DispatchQueue.main.async { self.keyframeCount = n }
@@ -234,7 +262,17 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         if link.isConnected, let depth = chosen,
            savedKeyframe || frame.timestamp - lastStreamTime >= 0.25 {
             lastStreamTime = frame.timestamp
-            streamFrame(frame, depth: depth, keyframe: savedKeyframe)
+            streamFrame(frame, depth: depth, keyframe: savedKeyframe, mask: mask)
+        }
+    }
+
+    /// Indicador "persona ignorada" con un poco de histéresis para que no parpadee.
+    private func updatePersonIndicator(_ seen: Bool) {
+        personFrames = seen ? min(personFrames + 1, 6) : max(personFrames - 1, 0)
+        let state = personState ? personFrames > 0 : personFrames >= 2
+        if state != personState {
+            personState = state
+            DispatchQueue.main.async { self.personInView = state }
         }
     }
 
@@ -260,9 +298,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     /// Envía un cuadro completo (foto a resolución completa, profundidad, confianza y posición) a la PC.
-    private func streamFrame(_ frame: ARFrame, depth: ARDepthData, keyframe: Bool) {
+    private func streamFrame(_ frame: ARFrame, depth: ARDepthData, keyframe: Bool, mask: [Bool]?) {
         guard let jpg = FrameCodec.jpeg(frame, scale: 1.0, quality: 0.85),
-              let dc = FrameCodec.depthAndConfidence(depth) else { return }
+              let dc = FrameCodec.depthAndConfidence(depth, mask: mask) else { return }
         var h = FrameCodec.header(frame, index: streamIndex, scale: 1.0)
         h["dw"] = dc.w
         h["dh"] = dc.h
@@ -348,7 +386,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: Integración de profundidad
 
-    private func integrate(_ frame: ARFrame) {
+    private func integrate(_ frame: ARFrame, mask: [Bool]?) {
         let chosen = activeSmooth ? (frame.smoothedSceneDepth ?? frame.sceneDepth)
                                   : (frame.sceneDepth ?? frame.smoothedSceneDepth)
         guard let depthData = chosen,
@@ -412,6 +450,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             let iv = min(imgH - 1, Int((Float(v) + 0.5) / sy))
             for u in stride(from: 0, to: dw, by: pixelStep) {
                 if cPtr[u] < minConf { continue }
+                if let mask, mask[v * dw + u] { continue }       // persona: no se integra
                 let d = dPtr[u]
                 if !d.isFinite || d < 0.15 || d > maxD { continue }
 

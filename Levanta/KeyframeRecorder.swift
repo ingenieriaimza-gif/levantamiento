@@ -106,7 +106,7 @@ final class KeyframeRecorder {
     /// Decide si este cuadro es clave (se movió o giró lo suficiente) y lo guarda.
     /// Se llama en la cola de escaneo. Devuelve true si se guardó.
     @discardableResult
-    func consider(frame: ARFrame, depth: ARDepthData) -> Bool {
+    func consider(frame: ARFrame, depth: ARDepthData, mask: [Bool]? = nil) -> Bool {
         guard directory != nil, count < maxFrames else { return false }
         guard frame.timestamp - lastTime >= minInterval else { return false }
         let T = frame.camera.transform
@@ -162,11 +162,12 @@ final class KeyframeRecorder {
             for u in 0..<w {
                 let d = dp[u]
                 var mm: UInt16 = 0
-                if d.isFinite && d > 0 && d < 65 { mm = UInt16((d * 1000).rounded()) }
+                let masked = mask?[v * w + u] ?? false
+                if !masked && d.isFinite && d > 0 && d < 65 { mm = UInt16((d * 1000).rounded()) }
                 let o = (v * w + u) * 2
                 depthBytes[o] = UInt8(mm & 0xff)
                 depthBytes[o + 1] = UInt8(mm >> 8)
-                confBytes[v * w + u] = cp[u]
+                confBytes[v * w + u] = masked ? 0 : cp[u]
             }
         }
 

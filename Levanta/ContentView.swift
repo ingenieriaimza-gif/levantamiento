@@ -26,6 +26,14 @@ struct ContentView: View {
                     AppUpdateBanner(link: engine.link)
                 }
                 Spacer()
+                if engine.isScanning && engine.personInView {
+                    Label("Persona detectada: se ignora", systemImage: "person.fill.xmark")
+                        .font(.footnote.weight(.semibold))
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(Color(red: 0.35, green: 0.69, blue: 1.0).opacity(0.9), in: Capsule())
+                        .foregroundStyle(.black)
+                        .transition(.opacity)
+                }
                 if engine.isScanning && engine.tooFast {
                     Label("Más despacio para fotos nítidas", systemImage: "tortoise.fill")
                         .font(.subheadline.weight(.bold))
@@ -313,6 +321,11 @@ struct SettingsView: View {
                     Toggle("Profundidad suavizada", isOn: $engine.smoothDepth)
                     Toggle("Guardar cuadros RGB-D (máxima calidad)", isOn: $engine.recordRGBD)
                     Toggle("Fotos nítidas (exposición y color fijos)", isOn: $engine.sharpCapture)
+                    Toggle("Quitar personas (IA)", isOn: $engine.removePeople)
+                    if !engine.peopleRemovalAvailable {
+                        Text("Este iPhone no permite quitar personas junto con el LiDAR.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     Stepper("Lecturas mínimas por punto: \(engine.minObservations)",
                             value: $engine.minObservations, in: 1...5)
                         .onChange(of: engine.minObservations) { _, v in
