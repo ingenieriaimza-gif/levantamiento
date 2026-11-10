@@ -38,7 +38,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     // Ajustes (se aplican al reiniciar o al empezar un escaneo nuevo)
     /// Configuración fija (la mejor para levantamientos con la PC): no hay ajustes que mover.
     /// La nube del iPhone es solo una vista previa a 1 cm; la calidad final la hace la PC.
-    @Published var voxelSizeCm: Double = 1.0
+    @Published var voxelSizeCm: Double = 0.5
     @Published var maxDepth: Double = 3.5
     @Published var highConfidenceOnly = true
     @Published var minObservations: Int = 2
@@ -135,7 +135,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var sessionName = ""        // solo en el hilo principal
     private var tintLiveMesh = true
 
-    private let maxVoxels = 6_000_000
+    private let maxVoxels = 5_000_000
     private let processInterval: TimeInterval = 0.09   // ~11 cuadros por segundo
     private let pixelStep = 1                           // todos los píxeles del mapa de profundidad
 
@@ -421,26 +421,10 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private func receiveLiveMesh(_ data: Data) {
         lastLiveMesh = data
         lastLiveMeshTime = Date()
-        let tint = tintLiveMesh
-        // en modo calidad, cada vértice de la superficie de la PC toma el color de calidad
-        // según las lecturas que el iPhone tiene en ese lugar
-        (tint ? queue : DispatchQueue.global(qos: .userInitiated)).async {
-            var q: Data?
-            if tint, let verts = FrameCodec.liveMeshVertices(data) {
-                var cols = [Float](repeating: 0, count: verts.count * 3)
-                for (k, v) in verts.enumerated() {
-                    let c = self.quality(at: v)
-                    cols[k * 3] = c.x; cols[k * 3 + 1] = c.y; cols[k * 3 + 2] = c.z
-                }
-                q = cols.withUnsafeBufferPointer { Data(buffer: $0) }
-            }
-            let g = FrameCodec.liveMeshGeometry(data, tint: tint, qualityColors: q)
-            let tris = g?.elements.first?.primitiveCount ?? 0
-            DispatchQueue.main.async {
-                self.liveMeshNode.geometry = g
-                self.liveMeshTriangles = tris
-                self.pointsNode.isHidden = g != nil
-            }
+        // En la cámara solo se ven los puntos del iPhone (pintados por calidad): la superficie de la PC
+        // tapaba la vista. Se guarda para Revisar 3D ("En vivo (PC)").
+        if let u = FrameCodec.unpack(data), let nt = (u.header["nt"] as? NSNumber)?.intValue {
+            DispatchQueue.main.async { self.liveMeshTriangles = nt }
         }
     }
 
@@ -716,8 +700,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         queue.async {
             let minObs = self.activeMinObs
             let total = self.counts.reduce(0) { $0 + ($1 >= minObs ? 1 : 0) }
-            let geometry = show ? self.buildGeometry(mode: mode, maxPoints: 400_000,
-                                                     pointSize: 5, maxRadius: 4) : nil
+            let geometry = show ? self.buildGeometry(mode: mode, maxPoints: 900_000,
+                                                     pointSize: 3, maxRadius: 3) : nil
             DispatchQueue.main.async {
                 self.pointCount = total
                 self.pointsNode.geometry = geometry

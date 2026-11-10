@@ -178,7 +178,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text("vista previa")
+                    Text("1 punto cada 5 mm")
                     Text("\(engine.keyframeCount) fotos")
                 }
                 .font(.caption.monospaced())
