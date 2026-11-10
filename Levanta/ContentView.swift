@@ -326,6 +326,11 @@ struct SettingsView: View {
                     Toggle("Profundidad suavizada", isOn: $engine.smoothDepth)
                     Toggle("Guardar cuadros RGB-D (máxima calidad)", isOn: $engine.recordRGBD)
                     Toggle("Fotos nítidas (exposición y color fijos)", isOn: $engine.sharpCapture)
+                    Toggle("Borrar ruido al escanear", isOn: $engine.cleanNoise)
+                    Text(engine.removedPoints > 0
+                         ? "Borra los puntos que el LiDAR ve a través desde otra vista (ruido o cosas que se movieron). En este escaneo: \(engine.removedPoints) borrados."
+                         : "Borra los puntos que el LiDAR ve a través desde otra vista (ruido o cosas que se movieron).")
+                        .font(.caption).foregroundStyle(.secondary)
                     Toggle("Quitar personas (IA)", isOn: $engine.removePeople)
                     if !engine.peopleRemovalAvailable {
                         Text("Este iPhone no permite quitar personas junto con el LiDAR.")

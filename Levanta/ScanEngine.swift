@@ -49,6 +49,13 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             startSession(reset: false)
         }
     }
+    /// Borrar ruido: si en una vista nueva el LiDAR ve a través de un punto que ya estaba,
+    /// ese punto era ruido (o algo que se movió) y se elimina.
+    @Published var cleanNoise = true {
+        didSet { let on = cleanNoise; queue.async { self.activeCleanNoise = on } }
+    }
+    /// Puntos borrados por la limpieza en este escaneo.
+    @Published var removedPoints = 0
     /// Hay una persona frente a la cámara y se está ignorando.
     @Published var personInView = false
     @Published var peopleRemovalAvailable = true
@@ -80,6 +87,11 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var sums: [SIMD3<Float>] = []
     private var colorSums: [SIMD3<Float>] = []
     private var counts: [UInt16] = []
+    private var keys: [Int64] = []          // llave de cada vóxel (para borrarlo del índice)
+    private var misses: [UInt16] = []       // veces que el LiDAR vio a través del punto
+    private var activeCleanNoise = true
+    private var carveCursor = 0
+    private var removedTotal = 0
     private var scanning = false
     private var lastProcessTime: TimeInterval = 0
     private var activeVoxel: Float = 0.005
@@ -236,6 +248,11 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             self.sums.removeAll(keepingCapacity: false)
             self.colorSums.removeAll(keepingCapacity: false)
             self.counts.removeAll(keepingCapacity: false)
+            self.keys.removeAll(keepingCapacity: false)
+            self.misses.removeAll(keepingCapacity: false)
+            self.carveCursor = 0
+            self.removedTotal = 0
+            DispatchQueue.main.async { self.removedPoints = 0 }
             self.activeVoxel = voxel
             DispatchQueue.main.async { self.startSession(reset: true) }
         }
@@ -530,9 +547,98 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                     sums.append(p)
                     colorSums.append(c)
                     counts.append(1)
+                    keys.append(key)
+                    misses.append(0)
                 }
             }
         }
+        if activeCleanNoise {
+            carve(dBase: dBase, cBase: cBase, dw: dw, dh: dh, dRow: dRow, cRow: cRow,
+                  fx: fx, fy: fy, cx: cx, cy: cy, T: T, mask: mask)
+        }
+    }
+
+    // MARK: Limpieza: borrar lo que el LiDAR ve a través
+
+    /// Revisa una parte de los puntos (unos 600 mil por cuadro, en rotación) contra la vista actual.
+    /// Si un punto queda claramente DELANTE de lo que mide el LiDAR en ese píxel (y de sus vecinos),
+    /// el sensor está viendo a través de él: era ruido o algo que ya no está. Con 2 vistas así,
+    /// y si se vio a través al menos la mitad de las veces que se leyó, se borra.
+    private func carve(dBase: UnsafeMutableRawPointer, cBase: UnsafeMutableRawPointer, dw: Int, dh: Int,
+                       dRow: Int, cRow: Int, fx: Float, fy: Float, cx: Float, cy: Float,
+                       T: simd_float4x4, mask: [Bool]?) {
+        let n = sums.count
+        guard n > 0 else { return }
+        // profundidad confiable de este cuadro y su mínimo en 3×3 (protege bordes y piezas delgadas)
+        var depth = [Float](repeating: 0, count: dw * dh)
+        for v in 0..<dh {
+            let dp = dBase.advanced(by: v * dRow).assumingMemoryBound(to: Float32.self)
+            let cp = cBase.advanced(by: v * cRow).assumingMemoryBound(to: UInt8.self)
+            for u in 0..<dw {
+                let d = dp[u]
+                let masked = mask?[v * dw + u] ?? false
+                if cp[u] >= 2 && !masked && d.isFinite && d > 0.15 && d < activeMaxDepth { depth[v * dw + u] = d }
+            }
+        }
+        var minDepth = [Float](repeating: 0, count: dw * dh)   // 0 = no se sabe
+        for v in 1..<(dh - 1) {
+            for u in 1..<(dw - 1) {
+                var m = Float.greatestFiniteMagnitude
+                var ok = true
+                for dv in -1...1 {
+                    for du in -1...1 {
+                        let d = depth[(v + dv) * dw + u + du]
+                        if d == 0 { ok = false; break }
+                        m = min(m, d)
+                    }
+                    if !ok { break }
+                }
+                if ok { minDepth[v * dw + u] = m }
+            }
+        }
+
+        let inv = simd_inverse(T)
+        let span = min(n, 600_000)
+        if carveCursor >= n { carveCursor = 0 }
+        var toRemove: [Int] = []
+        var idx = carveCursor
+        for _ in 0..<span {
+            let c = counts[idx]
+            let p = sums[idx] / Float(c)
+            let q = inv * SIMD4<Float>(p.x, p.y, p.z, 1)
+            let z = -q.z
+            if z > 0.15 {
+                let u = Int((cx + fx * q.x / z).rounded())
+                let v = Int((cy - fy * q.y / z).rounded())
+                if u > 0 && v > 0 && u < dw - 1 && v < dh - 1 {
+                    let D = minDepth[v * dw + u]
+                    if D > 0 && z < D - max(0.02, 0.02 * D) {
+                        let m = misses[idx] &+ 1
+                        misses[idx] = m
+                        if m >= 2 && UInt32(m) * 2 >= UInt32(c) { toRemove.append(idx) }
+                    }
+                }
+            }
+            idx += 1
+            if idx >= n { idx = 0 }
+        }
+        carveCursor = idx
+        guard !toRemove.isEmpty else { return }
+        // borrar intercambiando con el último (de mayor a menor índice para no mover los pendientes)
+        for i in toRemove.sorted(by: >) {
+            let last = sums.count - 1
+            keyToIndex.removeValue(forKey: keys[i])
+            if i != last {
+                sums[i] = sums[last]; colorSums[i] = colorSums[last]; counts[i] = counts[last]
+                keys[i] = keys[last]; misses[i] = misses[last]
+                keyToIndex[keys[i]] = Int32(i)
+            }
+            sums.removeLast(); colorSums.removeLast(); counts.removeLast()
+            keys.removeLast(); misses.removeLast()
+        }
+        removedTotal += toRemove.count
+        let total = removedTotal
+        DispatchQueue.main.async { self.removedPoints = total }
     }
 
     // MARK: Vista previa en vivo
