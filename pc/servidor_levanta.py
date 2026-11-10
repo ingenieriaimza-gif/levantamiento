@@ -49,7 +49,7 @@ import open3d as o3d  # noqa: E402
 from aiohttp import WSMsgType, web  # noqa: E402
 
 ARKIT_TO_CV = np.diag([1.0, -1.0, -1.0, 1.0])
-MSG_FRAME, MSG_START, MSG_END, MSG_DISCARD, MSG_MEASURES = 1, 2, 3, 4, 5
+MSG_FRAME, MSG_START, MSG_END, MSG_DISCARD, MSG_MEASURES, MSG_ZONES = 1, 2, 3, 4, 5, 6
 MSG_MESH, MSG_STATUS, MSG_MEASURES_OUT = 10, 11, 12
 
 
@@ -245,6 +245,9 @@ class Server:
                                                {"device": h.get("dispositivo", "iPhone"),
                                                 "system": h.get("sistema", "")}, refiner=refiner)
                         self.status.update(cuadros=0, clave=0)
+                        if getattr(self, "zones", None):      # piezas marcadas antes de empezar a grabar
+                            with open(os.path.join(self.session.dir, "zonas.json"), "w", encoding="utf-8") as f:
+                                json.dump({"zonas": self.zones}, f)
                         await self.send_status(f"Escaneo iniciado: {name}")
                     else:
                         await self.send_status("Escaneo reanudado")
@@ -256,6 +259,15 @@ class Server:
                     await loop.run_in_executor(self.pool, self.session.add_frame, h, jpeg, depth, conf)
                     self.status["cuadros"] = self.session.frames
                     self.status["clave"] = self.session.keyframes
+                elif kind == MSG_ZONES:
+                    # piezas enfocadas en el iPhone: se reconstruyen a 2 mm al crear el modelo
+                    zonas = [z for z in h.get("zonas", []) if "centro" in z and "medio" in z][:50]
+                    self.zones = zonas
+                    if self.session is not None:
+                        with open(os.path.join(self.session.dir, "zonas.json"), "w", encoding="utf-8") as f:
+                            json.dump({"zonas": zonas}, f)
+                    if zonas:
+                        await self.send_status(f"Piezas enfocadas: {', '.join(z.get('nombre', '') for z in zonas)}")
                 elif kind == MSG_MEASURES:
                     meds = [dict(m, origen="iphone") for m in h.get("medidas", [])][:500]
                     carpeta = h.get("carpeta")

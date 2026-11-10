@@ -55,8 +55,8 @@ def progreso(frac, etapa):
 
 # avance total de este script (el programa de la PC deja el 4 % final para el Gaussian Splatting)
 # (pesos medidos en una corrida real: la malla y el modelo con fotos son lo más tardado)
-ETAPAS = {"carga": (0.00, 0.01), "nitidez": (0.01, 0.03), "fusion": (0.03, 0.10), "malla": (0.10, 0.20),
-          "completo": (0.20, 0.32), "fotos": (0.32, 0.90), "exportar": (0.90, 1.00)}
+ETAPAS = {"carga": (0.00, 0.01), "nitidez": (0.01, 0.03), "fusion": (0.03, 0.10), "malla": (0.10, 0.18),
+          "detalle": (0.18, 0.22), "completo": (0.22, 0.32), "fotos": (0.32, 0.90), "exportar": (0.90, 1.00)}
 
 
 def avance(etapa, f, texto):
@@ -164,7 +164,7 @@ def quitar_rasantes(depth_mm, fx, max_tan=2.5):
 
 
 def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_width=768, etapa="fusion",
-         max_tan=None):
+         max_tan=None, zona=None, block_count=50000):
     """ia: RefinadorIA opcional; si se da, cada cuadro se refina a ia_width de ancho antes de fusionarse."""
     dw, dh = int(meta["depthWidth"]), int(meta["depthHeight"])
     ia_aporte = []
@@ -189,7 +189,7 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
         attr_names=("tsdf", "weight", "color"),
         attr_dtypes=(o3c.float32, o3c.float32, o3c.float32),
         attr_channels=((1), (1), (3)),
-        voxel_size=voxel, block_resolution=8, block_count=50000,
+        voxel_size=voxel, block_resolution=8, block_count=block_count,
         device=o3c.Device("CPU:0"))
     trunc_mult = trunc / voxel
 
@@ -223,6 +223,11 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
             ia_aporte.append(frac)
             depth = quitar_rasantes(depth, fr["fx"] * ow / float(fr.get("w", iw)), max_tan=max_tan or RASANTE_TAN)
         color = cv2.cvtColor(cv2.resize(color_full, (ow, oh), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
+        if zona is not None:
+            # solo lo que cae dentro de la caja de la pieza (+2 cm): el resto no se integra
+            depth = recortar_a_zona(depth, fr, zona, ow, oh, iw, ih)
+            if not depth.any():
+                continue
 
         sx, sy = ow / float(fr.get("w", iw)), oh / float(fr.get("h", ih))
         # escalar el centro óptico respecto al centro del píxel
@@ -238,7 +243,7 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
                                                       trunc_voxel_multiplier=trunc_mult)
         vbg.integrate(coords, dimg, cimg, Kt, Et, 1000.0, dmax, trunc_voxel_multiplier=trunc_mult)
         n_ok += 1
-        if n % 5 == 0:
+        if n % 5 == 0 and etapa in ("fusion", "completo"):
             avance(etapa, 0.85 * (n + 1) / len(used),
                    f"Uniendo cuadros {n + 1} de {len(used)}" if etapa == "fusion"
                    else f"Completando zonas difíciles ({n + 1} de {len(used)})")
@@ -247,6 +252,122 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
     if ia_aporte:
         log(f"  IA: aportó detalle en {np.mean(ia_aporte) * 100:.0f} % de los píxeles (el resto, LiDAR)")
     return vbg, n_ok, dropped
+
+
+def recortar_a_zona(depth_mm, fr, zona, ow, oh, iw, ih, margen=0.02):
+    """Pone en 0 la profundidad de los píxeles cuyo punto 3D queda fuera de la caja de la pieza."""
+    sx, sy = ow / float(fr.get("w", iw)), oh / float(fr.get("h", ih))
+    fx, fy = fr["fx"] * sx, fr["fy"] * sy
+    cx, cy = (fr["cx"] + 0.5) * sx - 0.5, (fr["cy"] + 0.5) * sy - 0.5
+    v, u = np.nonzero(depth_mm)
+    if len(u) == 0:
+        return depth_mm
+    d = depth_mm[v, u].astype(np.float64) / 1000.0
+    pc = np.stack([(u - cx) / fx * d, -(v - cy) / fy * d, -d, np.ones_like(d)], 1)
+    pw = pc @ pose_matrix(fr).T
+    c, h = np.asarray(zona["centro"], float), np.asarray(zona["medio"], float) + margen
+    out = (np.abs(pw[:, :3] - c) > h).any(1)
+    depth_mm = depth_mm.copy()
+    depth_mm[v[out], u[out]] = 0
+    return depth_mm
+
+
+def cargar_zonas(dirs):
+    """Piezas enfocadas en el iPhone (zonas.json en el paquete)."""
+    for d in dirs:
+        p = os.path.join(d, "zonas.json")
+        if os.path.exists(p):
+            try:
+                with open(p, encoding="utf-8") as f:
+                    z = [x for x in json.load(f).get("zonas", []) if "centro" in x and "medio" in x]
+                if z:
+                    return z
+            except (OSError, ValueError):
+                pass
+    return []
+
+
+def en_zonas(P, zonas, encoger=0.0):
+    """Máscara de puntos (N×3, mundo de ARKit) dentro de alguna caja (encogida `encoger` m)."""
+    m = np.zeros(len(P), bool)
+    for z in zonas:
+        c, h = np.asarray(z["centro"], float), np.asarray(z["medio"], float) - encoger
+        m |= (np.abs(P - c) <= h).all(1)
+    return m
+
+
+def zonas_a(M, zonas, scale=1.0):
+    """Cajas en otro sistema (Z arriba, escala): centro transformado; medios con los ejes cambiados."""
+    out = []
+    for z in zonas:
+        c = (M @ np.r_[np.asarray(z["centro"], float), 1.0])[:3]
+        hx, hy, hz = (np.asarray(z["medio"], float) * scale).tolist()
+        out.append(dict(z, centro=c.tolist(), medio=[hx, hz, hy]))
+    return out
+
+
+def piezas_en_detalle(meta, frames, zonas, base, lecturas, voxel=0.002):
+    """Reconstruye cada pieza enfocada a 2 mm con las tomas cercanas y la une a la malla general:
+    dentro de la caja se cambia la malla de 4 mm por la de 2 mm."""
+    trozos = []
+    for k, z in enumerate(zonas):
+        c, h = np.asarray(z["centro"], float), np.asarray(z["medio"], float)
+        cerca = []
+        for fr in frames:
+            p = pose_matrix(fr)[:3, 3]
+            if np.linalg.norm(np.maximum(np.abs(p - c) - h, 0)) <= 1.2:
+                cerca.append(fr)
+        nombre = z.get("nombre", f"Pieza {k + 1}")
+        if len(cerca) < 3:
+            log(f"  {nombre}: muy pocas tomas de cerca ({len(cerca)}); se queda con el detalle normal")
+            continue
+        avance("detalle", k / len(zonas), f"Detalle de {nombre} ({len(cerca)} tomas de cerca)")
+        vbg, n_ok, _ = fuse(meta, cerca, voxel, 5.0 * voxel, 1.5, 2, True, etapa="detalle", zona=z,
+                            block_count=40000)
+        fino, _ = extract(vbg, lecturas)
+        del vbg
+        F = np.asarray(fino.triangles)
+        if len(F) == 0:
+            continue
+        cen = np.asarray(fino.vertices)[F].mean(1)
+        fino.remove_triangles_by_mask(~en_zonas(cen, [z]))
+        fino.remove_unreferenced_vertices()
+        fino = clean_mesh(fino, min_triangles=50) if len(fino.triangles) else fino
+        if len(fino.triangles) == 0:
+            continue
+        fino = fino.filter_smooth_taubin(number_of_iterations=5)
+        trozos.append(fino)
+        log(f"  {nombre}: {len(fino.triangles):,} triángulos a 2 mm con {n_ok} tomas de cerca")
+    if not trozos:
+        return base, 0
+    # quitar de la malla general lo que queda dentro de las cajas con detalle (encogidas 4 mm: traslape mínimo)
+    F = np.asarray(base.triangles)
+    cen = np.asarray(base.vertices)[F].mean(1)
+    out = o3d.geometry.TriangleMesh(base)
+    out.remove_triangles_by_mask(en_zonas(cen, zonas, encoger=0.004))
+    out.remove_unreferenced_vertices()
+    n_fino = 0
+    for t in trozos:
+        out += t
+        n_fino += len(t.triangles)
+    out.compute_vertex_normals()
+    return out, n_fino
+
+
+def separar_zonas(mesh, zonas):
+    """(malla fuera de las piezas, malla dentro) según el centro de cada triángulo."""
+    F = np.asarray(mesh.triangles)
+    if not zonas or len(F) == 0:
+        return mesh, None
+    m = en_zonas(np.asarray(mesh.vertices)[F].mean(1), zonas)
+    if not m.any():
+        return mesh, None
+    fuera, dentro = o3d.geometry.TriangleMesh(mesh), o3d.geometry.TriangleMesh(mesh)
+    fuera.remove_triangles_by_mask(m)
+    dentro.remove_triangles_by_mask(~m)
+    for g in (fuera, dentro):
+        g.remove_unreferenced_vertices()
+    return fuera, dentro
 
 
 def extract(vbg, min_weight):
@@ -385,6 +506,11 @@ def main():
             log(f"Calibración de escala: ×{scale:.5f}")
         mesh = clean_mesh(mesh, min_triangles=400)
         mesh = acabado(mesh)
+        zonas = cargar_zonas(dirs)
+        n_detalle = 0
+        if zonas:
+            log(f"Piezas enfocadas en el iPhone: {len(zonas)}")
+            mesh, n_detalle = piezas_en_detalle(meta, frames, zonas, mesh, args.lecturas)
         pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=16, std_ratio=2.5)
 
 
@@ -421,11 +547,26 @@ def main():
                 except Exception as e:      # noqa: BLE001 — si no alcanza la memoria, se usa la malla exacta
                     log(f"  (modelo completo omitido: {e})")
             avance("fotos", 0, "Preparando las fotos")
+            target_tex = args.triangulos_textura
+            if n_detalle:
+                # el presupuesto de triángulos se reparte: las piezas conservan su detalle (hasta la mitad)
+                fuera, dentro = separar_zonas(tex_mesh, zonas)
+                if dentro is not None:
+                    lim_d = target_tex // 2
+                    if len(dentro.triangles) > lim_d:
+                        dentro = dentro.simplify_quadric_decimation(lim_d)
+                    lim_f = max(200_000, target_tex - len(dentro.triangles))
+                    if len(fuera.triangles) > lim_f:
+                        fuera = fuera.simplify_quadric_decimation(lim_f)
+                    tex_mesh = fuera + dentro
+                    tex_mesh.compute_vertex_normals()
+                    target_tex = len(tex_mesh.triangles) + 1
+                    del fuera, dentro
             holder, hibrida = [tex_mesh], tex_mesh is not mesh
             del tex_mesh
             gc.collect()
             tex_info = texture_mesh(holder.pop(), kf, args.salida, dmax=tex_dmax, consume=hibrida,
-                                    target_triangles=args.triangulos_textura,
+                                    target_triangles=target_tex,
                                     page_size=args.pagina_textura,
                                     texture_scale=args.escala_textura,
                                     to_z_up=Y_UP_TO_Z_UP, scale=scale)
@@ -454,12 +595,16 @@ def main():
         # encoger), reducción por vóxel (poca memoria) y otro suavizado ligero. En la escena de prueba
         # esto quedó MÁS exacto que la malla sin tratar (95 %: 4.3 mm vs 6.2 mm) con la mitad de triángulos.
         stl = o3d.geometry.TriangleMesh(mesh)          # ya viene suavizada (acabado)
+        zonas_z = zonas_a(M, zonas, scale) if n_detalle else []
+        stl, stl_det = separar_zonas(stl, zonas_z)       # las piezas en detalle no se reducen
         if len(stl.triangles) > args.max_triangulos_stl:
             ratio = math.sqrt(len(stl.triangles) / args.max_triangulos_stl)
             stl = stl.simplify_vertex_clustering(voxel_size=args.voxel * ratio)
             stl.remove_degenerate_triangles()
             stl.remove_unreferenced_vertices()
         stl = stl.filter_smooth_taubin(number_of_iterations=5)
+        if stl_det is not None:
+            stl += stl_det
         stl.scale(1000.0, center=(0, 0, 0))     # metros -> milímetros
         stl.compute_triangle_normals()
         stl.vertex_colors = o3d.utility.Vector3dVector()
@@ -477,6 +622,8 @@ def main():
             f"Extensión (X × Y × Z): {hi[0] - lo[0]:.3f} × {hi[1] - lo[1]:.3f} × {hi[2] - lo[2]:.3f} m",
             "Sistema: Z hacia arriba; STL y OBJ en milímetros (nube en metros). Origen: donde arrancó el escaneo.",
             "Para medir e interferencias exactas: malla_solidworks.stl (solo lecturas de alta confianza).",
+            *([f"Piezas enfocadas: {len(zonas)}; reconstruidas a 2 mm ({n_detalle:,} triángulos de detalle)."]
+              if zonas else []),
             "Con colores y texturas: Navisworks -> obj/modelo_navisworks.fbx (junto a sus textura_*.jpg);",
             "SolidWorks 2021+ -> modelo_solidworks.3mf (textura dentro del archivo).",
             "El modelo con fotos usa esa misma malla exacta y además rellena zonas de confianza media",

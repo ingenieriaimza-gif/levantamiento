@@ -104,6 +104,8 @@ def main():
     ap.add_argument("--salida", default="paquete_sint")
     ap.add_argument("--cuadros", type=int, default=120)
     ap.add_argument("--semilla", type=int, default=7)
+    ap.add_argument("--pieza", type=int, default=0,
+                    help="además, N tomas de cerca (0.45 m) alrededor del bajante de 1.5\" marcado como pieza")
     args = ap.parse_args()
     rng = np.random.default_rng(args.semilla)
 
@@ -117,14 +119,26 @@ def main():
 
     # recorrido: arco frente al skid, a dos alturas, mirando a distintos puntos
     lines = []
-    n = args.cuadros
-    for i in range(n):
-        a = -1.1 + 2.2 * i / (n - 1)
+    poses = []
+    for i in range(args.cuadros):
+        a = -1.1 + 2.2 * i / (args.cuadros - 1)
         r = 1.35 + 0.15 * math.sin(i * 0.7)
         height = 1.15 + 0.35 * (i % 2)
         eye = np.array([1.6 * math.sin(a), height, 0.15 + r * math.cos(a)])
         target = np.array([0.9 * math.sin(a * 1.3), 0.95, -0.15]) + rng.normal(0, 0.05, 3)
-        T_true = look_at_arkit(eye, target)
+        poses.append(look_at_arkit(eye, target))
+    pieza = np.array([0.9, 0.6, 0.25])
+    for k in range(args.pieza):
+        # vuelta de cerca alrededor del bajante (por el frente y los lados, como se puede en un skid)
+        a = -1.2 + 2.4 * k / max(1, args.pieza - 1)
+        eye = pieza + np.array([0.45 * math.sin(a), -0.15 + 0.3 * (k % 3) / 2, 0.45 * math.cos(a)])
+        poses.append(look_at_arkit(eye, pieza + np.array([0, eye[1] - pieza[1], 0]) + rng.normal(0, 0.01, 3)))
+    if args.pieza:
+        with open(os.path.join(args.salida, "zonas.json"), "w") as f:
+            json.dump({"zonas": [{"id": "p1", "nombre": "Bajante 1.5in", "centro": [0.9, 0.6, 0.25],
+                                  "medio": [0.07, 0.3, 0.07]}]}, f)
+    n = len(poses)
+    for i, T_true in enumerate(poses):
 
         # imagen de color
         rays = pixel_rays(T_true, IMG_W, IMG_H)
