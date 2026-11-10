@@ -158,7 +158,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var sessionName = ""        // solo en el hilo principal
     private var tintLiveMesh = true
 
-    private let maxVoxels = 5_000_000
+    private let maxVoxels = 7_000_000
+    /// Ya se limpió y sigue lleno: la vista previa deja de crecer (las fotos para la PC siguen).
+    private var cloudFull = false
     private let processInterval: TimeInterval = 0.09   // ~11 cuadros por segundo
     private let pixelStep = 1                           // todos los píxeles del mapa de profundidad
 
@@ -335,6 +337,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             self.firstDir.removeAll(keepingCapacity: false)
             self.diverse.removeAll(keepingCapacity: false)
             self.carveCursor = 0
+            self.cloudFull = false
             self.removedTotal = 0
             DispatchQueue.main.async { self.removedPoints = 0 }
             self.activeVoxel = voxel
@@ -598,6 +601,16 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let half: Int64 = 1 << 20
         let limit: Float = Float(half - 2)
 
+        if sums.count >= maxVoxels && !cloudFull {
+            // lleno: se quitan los puntos de una sola lectura (ruido o muy lejos) para seguir agregando
+            pruneWeak()
+            if sums.count > maxVoxels * 85 / 100 {
+                cloudFull = true
+                DispatchQueue.main.async {
+                    self.statusMessage = "La vista del iPhone llegó a su límite de puntos. El escaneo sigue grabando todo para la PC; para ver más aquí, guarda y empieza otro escaneo."
+                }
+            }
+        }
         if sums.count >= maxVoxels {
             // la nube del iPhone es solo vista previa: se deja de crecer, pero el escaneo sigue
             // (fotos y profundidad se siguen mandando a la PC y guardando para procesar)
@@ -720,6 +733,33 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                   fx: fx, fy: fy, cx: cx, cy: cy, T: T, mask: mask)
         }
         return st
+    }
+
+    // MARK: Limpieza cuando se llena
+
+    /// Quita los vóxeles débiles: una sola lectura, o dos lecturas tomadas de lejos (> 1.5 m).
+    /// Casi siempre son ruido u orillas lejanas que se volverán a leer mejor al acercarte.
+    private func pruneWeak() {
+        let n = sums.count
+        var w = 0
+        for i in 0..<n {
+            let c = counts[i]
+            if c < 2 || (c < 3 && nearCounts[i] == 0) { continue }
+            if w != i {
+                sums[w] = sums[i]; colorSums[w] = colorSums[i]; counts[w] = counts[i]
+                keys[w] = keys[i]; misses[w] = misses[i]; nearCounts[w] = nearCounts[i]
+                closeCounts[w] = closeCounts[i]; firstDir[w] = firstDir[i]; diverse[w] = diverse[i]
+            }
+            w += 1
+        }
+        let drop = n - w
+        guard drop > 0 else { return }
+        sums.removeLast(drop); colorSums.removeLast(drop); counts.removeLast(drop)
+        keys.removeLast(drop); misses.removeLast(drop); nearCounts.removeLast(drop)
+        closeCounts.removeLast(drop); firstDir.removeLast(drop); diverse.removeLast(drop)
+        keyToIndex.removeAll(keepingCapacity: true)
+        for i in 0..<w { keyToIndex[keys[i]] = Int32(i) }
+        carveCursor = 0
     }
 
     // MARK: Limpieza: borrar lo que el LiDAR ve a través
