@@ -130,8 +130,27 @@ def sharpness(path):
 
 # ---------------------------------------------------------------- fusión
 
-def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur):
+RASANTE_TAN = float(os.environ.get("RGBD_RASANTE_TAN", "2.5"))   # ≈ 68°
+
+
+def quitar_rasantes(depth_mm, fx, max_tan=2.5):
+    """Quita puntos vistos casi de refilón (pendiente de la superficie respecto a la vista > max_tan).
+    En profundidad de alta resolución esos puntos engordan los contornos de tubos y bordes."""
+    z = depth_mm.astype(np.float32) / 1000.0
+    valid = z > 0
+    gx = cv2.Sobel(z, cv2.CV_32F, 1, 0, ksize=3) / 8.0
+    gy = cv2.Sobel(z, cv2.CV_32F, 0, 1, ksize=3) / 8.0
+    slope = np.hypot(gx, gy) * fx / np.maximum(z, 1e-3)
+    nb = cv2.erode(valid.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0     # gradiente fiable
+    out = depth_mm.copy()
+    out[nb & (slope > max_tan)] = 0
+    return out
+
+
+def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_width=768):
+    """ia: RefinadorIA opcional; si se da, cada cuadro se refina a ia_width de ancho antes de fusionarse."""
     dw, dh = int(meta["depthWidth"]), int(meta["depthHeight"])
+    ia_aporte = []
 
     # Descartar fotos movidas (las más borrosas respecto al resto)
     used = frames
@@ -159,18 +178,31 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur):
         if depth.size != dw * dh:
             continue
         depth = depth.reshape(dh, dw).astype(np.uint16)
-        if os.path.exists(fr["conf"]) and min_conf > 0:
-            conf = np.fromfile(fr["conf"], dtype=np.uint8)
-            if conf.size == dw * dh:
-                depth[conf.reshape(dh, dw) < min_conf] = 0
+        conf = None
+        if os.path.exists(fr["conf"]):
+            c = np.fromfile(fr["conf"], dtype=np.uint8)
+            if c.size == dw * dh:
+                conf = c.reshape(dh, dw)
+                if min_conf > 0:
+                    depth[conf < min_conf] = 0
 
-        color = cv2.imread(fr["jpg"], cv2.IMREAD_COLOR)
-        if color is None:
+        color_full = cv2.imread(fr["jpg"], cv2.IMREAD_COLOR)
+        if color_full is None:
             continue
-        iw, ih = color.shape[1], color.shape[0]
-        color = cv2.cvtColor(cv2.resize(color, (dw, dh), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
+        iw, ih = color_full.shape[1], color_full.shape[0]
+        ow, oh = dw, dh
+        if ia is not None:
+            # resolución de trabajo con IA: misma proporción que la foto
+            ow = int(ia_width)
+            oh = int(round(ow * ih / iw))
+            rgb_full = cv2.cvtColor(color_full, cv2.COLOR_BGR2RGB)
+            from ia_profundidad import refinar_cuadro
+            depth, frac = refinar_cuadro(ia, rgb_full, depth, conf, (ow, oh))
+            ia_aporte.append(frac)
+            depth = quitar_rasantes(depth, fr["fx"] * ow / float(fr.get("w", iw)), max_tan=RASANTE_TAN)
+        color = cv2.cvtColor(cv2.resize(color_full, (ow, oh), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2RGB)
 
-        sx, sy = dw / float(fr.get("w", iw)), dh / float(fr.get("h", ih))
+        sx, sy = ow / float(fr.get("w", iw)), oh / float(fr.get("h", ih))
         # escalar el centro óptico respecto al centro del píxel
         K = np.array([[fr["fx"] * sx, 0, (fr["cx"] + 0.5) * sx - 0.5 + PIXEL_OFFSET],
                       [0, fr["fy"] * sy, (fr["cy"] + 0.5) * sy - 0.5 + PIXEL_OFFSET],
@@ -186,6 +218,8 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur):
         n_ok += 1
         if (n + 1) % 50 == 0:
             log(f"  {n + 1}/{len(used)} cuadros fusionados ({time.time() - t0:.0f} s)")
+    if ia_aporte:
+        log(f"  IA: aportó detalle en {np.mean(ia_aporte) * 100:.0f} % de los píxeles (el resto, LiDAR)")
     return vbg, n_ok, dropped
 
 
@@ -254,6 +288,8 @@ def main():
                     help="calibración: distancia real y la misma distancia medida en la nube (m)")
     ap.add_argument("--max-triangulos-stl", type=int, default=1_500_000)
     ap.add_argument("--sin-textura", action="store_true", help="no generar el modelo con fotos")
+    ap.add_argument("--ia", action="store_true", help="refinar la profundidad con IA (Prompt Depth Anything)")
+    ap.add_argument("--ia-ancho", type=int, default=768, help="ancho de la profundidad refinada por IA")
     ap.add_argument("--triangulos-textura", type=int, default=700_000)
     ap.add_argument("--pagina-textura", type=int, default=4096, help="tamaño de cada página de textura")
     ap.add_argument("--escala-textura", type=float, default=1.0,
@@ -269,8 +305,17 @@ def main():
         log(f"Paquete: {len(frames)} cuadros en {len(dirs)} parte(s), "
             f"profundidad {meta['depthWidth']}×{meta['depthHeight']}")
 
+        ia = None
+        if args.ia:
+            from ia_profundidad import RefinadorIA, disponible
+            if not disponible():
+                log("La IA no está instalada en esta PC: se procesa solo con el LiDAR.")
+            else:
+                ia = RefinadorIA()
+                log(f"IA de profundidad activa ({ia.device})")
         vbg, used, dropped = fuse(meta, frames, args.voxel, trunc, args.dmax, args.conf,
-                                  not args.sin_filtro_borrosas)
+                                  not args.sin_filtro_borrosas, ia=ia, ia_width=args.ia_ancho)
+        del ia
         log(f"Fusionados {used} cuadros ({dropped} descartados por borrosos)")
 
         mesh, pcd = extract(vbg, args.lecturas)

@@ -1,0 +1,42 @@
+name: Prueba de IA (profundidad)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tools/ia_profundidad.py"
+      - "tools/procesar_rgbd.py"
+      - ".github/workflows/ia.yml"
+  workflow_dispatch:
+
+jobs:
+  ia:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Librerías
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r pc/requirements.txt
+          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install "transformers==5.22.2" huggingface_hub
+      - name: Escena simulada
+        run: |
+          mkdir -p sim && cd sim
+          python -I ../tools/sintetico.py --salida paquete --cuadros 60
+      - name: Modelo real en un cuadro
+        run: |
+          cd sim
+          python -I ../tools/ia_profundidad.py paquete/frames/000020.jpg paquete/frames/000020.depth paquete/frames/000020.conf 256 192
+      - name: Solo LiDAR vs LiDAR + IA
+        run: |
+          cd sim
+          python -I ../tools/procesar_rgbd.py paquete --salida sin_ia --conf 2 --lecturas 2 --sin-textura | tail -3
+          python -I ../tools/procesar_rgbd.py paquete --salida con_ia --conf 2 --lecturas 2 --sin-textura --ia | grep -E "IA|Nube" 
+          echo "=== Exactitud contra la geometría real ==="
+          python -I ../tools/evaluar_sintetico.py sin_ia escena_real.ply
+          python -I ../tools/evaluar_sintetico.py con_ia escena_real.ply
