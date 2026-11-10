@@ -69,6 +69,9 @@
   .file-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
   .file-row > div:first-child { min-width: 0; }
   .file-title { font-weight: 600; }
+  .m-axes { display: flex; gap: 10px; flex-wrap: wrap; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
+  .m-axes .ax { padding: 1px 7px; border-radius: 6px; background: rgba(255,255,255,.06); }
+  .m-axes .ax.x { color: #ff7b72; } .m-axes .ax.y { color: #7ee787; } .m-axes .ax.z { color: #79c0ff; }
   .files button { font-family: var(--mono); font-size: 12px; }
   .ver { font: 600 28px var(--mono); }
   #upd-msg { min-height: 1.4em; }
@@ -482,11 +485,15 @@ function renderList() {
   $('meas-reproc').hidden = !(k !== 1 && viewing !== 'vivo');
   for (const m of measures) {
     const d = dist3(m.a, m.b) * k;
-    const dh = Math.hypot(m.a[0] - m.b[0], m.a[2] - m.b[2]) * k, dv = Math.abs(m.a[1] - m.b[1]) * k;
+    // ejes como en los archivos de SolidWorks/Navisworks (Z hacia arriba): X = x, Y = -z, Z = y del modelo
+    const dx = Math.abs(m.a[0] - m.b[0]) * k, dy = Math.abs(m.a[2] - m.b[2]) * k, dz = Math.abs(m.a[1] - m.b[1]) * k;
     const item = el('div', { className: 'm-item' + (m.calibra ? ' cal' : '') });
     item.append(el('div', { className: 'm-top' }, el('span', { textContent: m.nombre }), el('b', { textContent: fmt(d) }),
       el('span', { className: 'm-src ' + m.origen, textContent: m.origen === 'iphone' ? 'iPhone' : 'PC' })));
-    item.append(el('div', { className: 'm-sub', textContent: `horizontal ${fmt(dh)} · vertical ${fmt(dv)}` }));
+    item.append(el('div', { className: 'm-axes' },
+      el('span', { className: 'ax x', textContent: `X ${fmt(dx)}` }),
+      el('span', { className: 'ax y', textContent: `Y ${fmt(dy)}` }),
+      el('span', { className: 'ax z', textContent: `Z ${fmt(dz)}` })));
     const real = el('input', { type: 'number', step: '0.1', min: '0', placeholder: 'real mm', value: m.real ?? '' });
     real.setAttribute('aria-label', `Medida real de ${m.nombre} en milímetros`);
     real.onchange = () => { m.real = real.value === '' ? null : parseFloat(real.value); if (!m.real) m.calibra = false; changed(); };
@@ -690,6 +697,12 @@ async function loadScans() {
           body.append(el('div', { className: 'muted', textContent: 'Los archivos del modelo ya se pueden usar. La vista foto-realista se está entrenando en la tarjeta de video:' }), slot);
         } else if (s.vista_foto) {
           pills.append(el('span', { className: 'pill ok', textContent: 'vista foto-realista lista' }));
+          if (!s.html) {
+            const hb = el('button', { className: 'btn', type: 'button', textContent: 'Crear archivo HTML' });
+            hb.onclick = async () => { hb.disabled = true; const r = await post('/api/html_crear', { carpeta: s.carpeta });
+              if (r.ok) setTimeout(loadScans, 4000); else hb.textContent = r.mensaje; };
+            actions.append(hb);
+          }
         } else {
           const fb = el('button', { className: 'btn', type: 'button', textContent: 'Crear vista foto-realista' });
           fb.title = 'Entrena en la tarjeta de video una vista que se ve como las fotos desde cualquier ángulo';
@@ -717,6 +730,11 @@ async function loadScans() {
           rows = rows.filter(Boolean);
           if (rows.length) body.append(el('div', { className: 'file-group' }, el('h4', { textContent: titulo }), ...rows));
         };
+        if (s.html) {
+          s.archivos.push({ nombre: s.html.nombre, mb: s.html.mb });
+          grupo('Vista foto-realista',
+            fileRow('Archivo HTML', 'doble clic: se abre en Edge o Chrome, se mueve y se mide; sirve para compartir', s.html.nombre));
+        }
         grupo('Navisworks (interferencias)',
           fileRow('Modelo con fotos', 'se ve como el lugar real y sirve en Clash Detective; en milímetros', 'obj/modelo_texturizado.obj', 'modelo_texturizado.obj'),
           fileRow('Malla sin color', 'más ligera; en milímetros', 'malla_solidworks.stl'));

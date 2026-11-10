@@ -218,6 +218,18 @@ def _asset(release, name):
     return None
 
 
+def _html_de(res):
+    """Nombre del archivo HTML de la vista foto-realista en resultado/, o None."""
+    try:
+        for fn in sorted(os.listdir(res)):
+            if fn.startswith("vista_foto") and fn.endswith(".html"):
+                st = os.stat(os.path.join(res, fn))
+                return {"nombre": fn, "mb": round(st.st_size / 1e6, 1)}
+    except OSError:
+        pass
+    return None
+
+
 def _first_line(path):
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
@@ -337,6 +349,7 @@ class Gestion:
                     "error": _first_line(os.path.join(res, "error.txt")),
                     "fase": self.server.status.get("fase") if processing else None,
                     "vista_foto": os.path.exists(os.path.join(res, "vista_foto.ply")),
+                    "html": _html_de(res),
                     "vista_foto_error": _first_line(os.path.join(res, "vista_foto_error.txt")),
                     "nombre": name.replace("RGBD_", ""),
                     "carpeta": name,
@@ -581,6 +594,16 @@ class Gestion:
         if not vista_foto.disponible():
             return web.json_response({"ok": False, "mensaje": "Esta PC no tiene tarjeta de video NVIDIA"})
         asyncio.ensure_future(self.server.only_photo_view(d))
+        return web.json_response({"ok": True})
+
+    async def html_crear(self, request):
+        data = await request.json()
+        d = self._safe(data.get("carpeta", ""))
+        if self.server.status.get("procesando"):
+            return web.json_response({"ok": False, "mensaje": "La PC está ocupada; espera a que termine"})
+        if not os.path.exists(os.path.join(d, "resultado", "vista_foto.ply")):
+            return web.json_response({"ok": False, "mensaje": "Primero crea la vista foto-realista"})
+        asyncio.ensure_future(self.server.only_html(d))
         return web.json_response({"ok": True})
 
     async def medidas_get(self, request):
@@ -914,6 +937,7 @@ class Gestion:
         app.router.add_get("/api/modelo/{carpeta}", self.modelo)
         app.router.add_route("*", "/api/vista_foto/{carpeta}", self.vista_foto)
         app.router.add_post("/api/vista_foto_crear", self.vista_foto_crear)
+        app.router.add_post("/api/html_crear", self.html_crear)
         app.router.add_post("/api/carpeta/elegir", self.carpeta_elegir)
         app.router.add_post("/api/carpeta", self.carpeta_fijar)
         app.router.add_get("/api/ia", self.ia_estado)

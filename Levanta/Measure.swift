@@ -14,6 +14,10 @@ final class MeasureController: ObservableObject {
         var distance: Float { simd_distance(a, b) }
         var horizontal: Float { simd_length(SIMD2<Float>(a.x - b.x, a.z - b.z)) }
         var vertical: Float { abs(a.y - b.y) }
+        // ejes como en los archivos de SolidWorks/Navisworks (Z hacia arriba): X = x, Y = -z, Z = y
+        var dx: Float { abs(a.x - b.x) }
+        var dy: Float { abs(a.z - b.z) }
+        var dz: Float { abs(a.y - b.y) }
     }
 
     @Published private(set) var measures: [Measure] = []
@@ -232,11 +236,10 @@ struct MeasurePanel: View {
                 Spacer()
                 if let last = measure.measures.last, measure.pending == nil {
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text("horizontal \(MeasureController.format(last.horizontal))")
-                        Text("vertical \(MeasureController.format(last.vertical))")
+                        axis("X", last.dx, .red)
+                        axis("Y", last.dy, .green)
+                        axis("Z", last.dz, .blue)
                     }
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
                 }
             }
 
@@ -255,15 +258,20 @@ struct MeasurePanel: View {
                 ScrollView {
                     VStack(spacing: 6) {
                         ForEach(measure.measures.reversed()) { m in
-                            HStack {
-                                Text(m.name).font(.caption)
-                                Spacer()
-                                Text(MeasureController.format(m.distance)).font(.caption.monospaced().weight(.semibold))
+                            VStack(alignment: .leading, spacing: 1) {
+                                HStack {
+                                    Text(m.name).font(.caption)
+                                    Spacer()
+                                    Text(MeasureController.format(m.distance)).font(.caption.monospaced().weight(.semibold))
+                                }
+                                Text("X \(MeasureController.format(m.dx)) · Y \(MeasureController.format(m.dy)) · Z \(MeasureController.format(m.dz))")
+                                    .font(.caption2.monospaced())
+                                    .foregroundStyle(.secondary)
                             }
                         }
                     }
                 }
-                .frame(maxHeight: 70)
+                .frame(maxHeight: 90)
             }
             Text("Toca dos veces para acercarte a un punto. Un toque pone cada punto. Lo que midas aparece también en la PC.")
                 .font(.caption2)
@@ -282,6 +290,14 @@ struct MeasurePanel: View {
     private var readout: String {
         if let last = measure.measures.last, measure.pending == nil { return MeasureController.format(last.distance) }
         return "—"
+    }
+
+    private func axis(_ name: String, _ v: Float, _ c: Color) -> some View {
+        HStack(spacing: 4) {
+            Text(name).foregroundStyle(c).fontWeight(.bold)
+            Text(MeasureController.format(v)).foregroundStyle(.secondary)
+        }
+        .font(.caption.monospaced())
     }
 
     private func smallButton(_ icon: String, _ label: String, action: @escaping () -> Void) -> some View {

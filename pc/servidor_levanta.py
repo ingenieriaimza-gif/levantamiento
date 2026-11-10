@@ -468,7 +468,9 @@ class Server:
             await vista_foto.entrenar(sdir, on)
             self.status["progreso"] = {"carpeta": carpeta, "fraccion": 1.0, "etapa": "Listo", "fase": "foto",
                                        "restante_s": 0, "transcurrido_s": round(time.time() - t0)}
-            await self.send_status("Vista foto-realista lista: ábrela en Revisar 3D")
+            on(0.995, "Creando el archivo HTML para compartir")
+            await self.make_html(sdir)
+            await self.send_status("Vista foto-realista lista: ábrela en Revisar 3D o con el archivo HTML")
         except Exception as e:      # noqa: BLE001
             with open(err_path, "w", encoding="utf-8") as f:
                 f.write(f"{e}\n")
@@ -476,6 +478,29 @@ class Server:
             await self.send_status(f"No se pudo crear la vista foto-realista: {e}")
         finally:
             self.status["fase"] = None
+
+    async def make_html(self, sdir):
+        """Archivo HTML único (vista foto-realista + medir). Si falla, no afecta lo demás."""
+        cmd = [PYTHON, "-I", "-X", "utf8", os.path.join(TOOLS, "exportar_html.py"), sdir]
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
+                                                    stderr=asyncio.subprocess.STDOUT, creationflags=NO_WINDOW)
+        out, _ = await proc.communicate()
+        text = out.decode("utf-8", errors="replace").strip().splitlines()
+        if proc.returncode != 0:
+            await self.send_status(f"No se pudo crear el archivo HTML: {text[-1] if text else proc.returncode}")
+            return False
+        return True
+
+    async def only_html(self, sdir):
+        self.status["procesando"] = True
+        self.processing_dir = sdir
+        try:
+            await self.send_status("Creando el archivo HTML…")
+            if await self.make_html(sdir):
+                await self.send_status("Archivo HTML listo (en la carpeta resultado del escaneo)")
+        finally:
+            self.status["procesando"] = False
+            await self.send_status()
 
     async def only_photo_view(self, sdir):
         """Crea solo la vista foto-realista de un escaneo que ya tiene modelo."""
