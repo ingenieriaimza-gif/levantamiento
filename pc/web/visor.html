@@ -692,33 +692,6 @@ async function loadScans() {
         actions.append(crear('Crear modelo 3D'));
       } else {
         pills.append(el('span', { className: 'pill ok', textContent: 'modelo listo' }));
-        // vista foto-realista (Gaussian Splatting)
-        if (s.procesando && s.fase === 'foto') {
-          pills.append(el('span', { className: 'pill warn', textContent: 'creando la vista foto-realista…' }));
-          const slot = el('div', { className: 'prog-slot' });
-          slot.dataset.carpeta = s.carpeta;
-          if (progress && progress.carpeta === s.carpeta) slot.append(progressView(progress));
-          else slot.append(el('div', { className: 'muted', textContent: 'Empezando…' }));
-          body.append(el('div', { className: 'muted', textContent: 'Los archivos del modelo ya se pueden usar. La vista foto-realista se está entrenando en la tarjeta de video:' }), slot);
-        } else if (s.vista_foto) {
-          pills.append(el('span', { className: 'pill ok', textContent: 'vista foto-realista lista' }));
-          if (!s.html) {
-            const hb = el('button', { className: 'btn', type: 'button', textContent: 'Crear archivo HTML' });
-            hb.onclick = async () => { hb.disabled = true; const r = await post('/api/html_crear', { carpeta: s.carpeta });
-              if (r.ok) setTimeout(loadScans, 4000); else hb.textContent = r.mensaje; };
-            actions.append(hb);
-          }
-        } else {
-          const fb = el('button', { className: 'btn', type: 'button', textContent: 'Crear vista foto-realista' });
-          fb.title = 'Entrena en la tarjeta de video una vista que se ve como las fotos desde cualquier ángulo';
-          fb.onclick = async () => {
-            fb.disabled = true;
-            const r = await post('/api/vista_foto_crear', { carpeta: s.carpeta });
-            if (r.ok) setTimeout(loadScans, 1500); else { fb.textContent = r.mensaje; }
-          };
-          actions.append(fb);
-          if (s.vista_foto_error) body.append(el('div', { className: 'muted', textContent: `Vista foto-realista: ${s.vista_foto_error}` }));
-        }
         const fileRow = (titulo, nota, nombre, etiqueta) => {
           if (!has(nombre)) return null;
           const f = s.archivos.find(x => x.nombre === nombre);
@@ -735,22 +708,11 @@ async function loadScans() {
           rows = rows.filter(Boolean);
           if (rows.length) body.append(el('div', { className: 'file-group' }, el('h4', { textContent: titulo }), ...rows));
         };
-        if (s.html) {
-          s.archivos.push({ nombre: s.html.nombre, mb: s.html.mb });
-          grupo('Vista foto-realista',
-            fileRow('Archivo HTML', 'doble clic: se abre en Edge o Chrome, se mueve y se mide; sirve para compartir', s.html.nombre));
-        }
+        // solo los dos archivos que se usan
         grupo('Navisworks (interferencias)',
-          fileRow('Modelo con fotos (FBX)', 'con colores y texturas; sirve en Clash Detective; en milímetros. Déjalo junto a sus imágenes textura_*.jpg', 'obj/modelo_navisworks.fbx', 'modelo_navisworks.fbx'),
-          fileRow('Malla sin color (STL)', 'más ligera; en milímetros', 'malla_solidworks.stl'));
+          fileRow('Modelo con fotos (FBX)', 'con colores y texturas; sirve en Clash Detective; en milímetros. Déjalo junto a sus imágenes textura_*.jpg', 'obj/modelo_navisworks.fbx', 'modelo_navisworks.fbx'));
         grupo('SolidWorks',
-          fileRow('Modelo con fotos (3MF)', 'con colores y texturas (SolidWorks 2021 o más nuevo): Abrir como cuerpo de gráficos; en milímetros', 'modelo_solidworks.3mf'),
-          fileRow('Malla sin color (STL)', 'más ligera y exacta: Abrir como cuerpo de gráficos e Insertar › Componente; en milímetros', 'malla_solidworks.stl'));
-        grupo('Otros',
-          fileRow('Modelo con fotos', 'para el iPhone (Vista rápida) o AR', 'modelo_texturizado.usdz'),
-          fileRow('Modelo con fotos (OBJ)', 'para otros programas 3D; en milímetros', 'obj/modelo_texturizado.obj', 'modelo_texturizado.obj'),
-          fileRow('Nube E57', 'para ReCap u otros programas', 'nube_fusionada.e57'),
-          fileRow('Reporte', 'medidas generales y datos del proceso', 'reporte.txt'));
+          fileRow('Modelo con fotos (3MF)', 'con colores y texturas (SolidWorks 2021 o más nuevo): Abrir como cuerpo de gráficos; en milímetros', 'modelo_solidworks.3mf'));
         if (has('modelo_texturizado.glb')) {
           const v3 = el('button', { className: 'btn primary', type: 'button', textContent: 'Revisar 3D y medir' });
           v3.onclick = () => openScan(s.carpeta, s.nombre);

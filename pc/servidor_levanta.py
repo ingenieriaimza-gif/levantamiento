@@ -414,12 +414,9 @@ class Server:
              "--voxel", "0.004", "--dmax", "3.5", "--conf", "2", "--lecturas", "2",
              "--triangulos-textura", "1500000"] + (["--escala", str(escala), "1"] if escala else [])
             + (["--ia"] if usar_ia else []),
-            [py, "-I", "-X", "utf8", os.path.join(TOOLS, "exportar_splat.py"), sdir,
-             "--salida", os.path.join(sdir, "splat"), "--nube", os.path.join(out, "nube_fusionada.ply")]
-            + (["--escala", str(escala)] if escala else []),
         ]
-        # avance: el primer programa va de 0 a 96 %, el de Gaussian Splatting el resto
-        tramos = [(0.0, 0.96), (0.96, 1.0)]
+        # solo el modelo para Navisworks (FBX) y SolidWorks (3MF); sin vista foto-realista (tardaba mucho)
+        tramos = [(0.0, 1.0)]
         t0 = time.time()
         ultimas = collections.deque(maxlen=40)
         err_path = os.path.join(out, "error.txt")
@@ -481,7 +478,6 @@ class Server:
                                            "etapa": "Listo", "restante_s": 0,
                                            "transcurrido_s": round(time.time() - t0)}
                 await self.send_status(f"Listo. Resultados en {out}")
-                await self.photo_view(sdir)
         finally:
             self.status["procesando"] = False
             await self.send_status()

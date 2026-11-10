@@ -469,7 +469,10 @@ def main():
     ap.add_argument("--pagina-textura", type=int, default=4096, help="tamaño de cada página de textura")
     ap.add_argument("--escala-textura", type=float, default=1.0,
                     help="reduce las fotos en la textura (p. ej. 0.5 para un modelo ligero para el iPhone)")
+    ap.add_argument("--todos-los-archivos", action="store_true",
+                    help="además de FBX y 3MF: nube PLY/E57, malla PLY, STL y OBJ (tarda más)")
     args = ap.parse_args()
+    todos = args.todos_los_archivos or args.sin_textura
 
     trunc = args.trunc or 5 * args.voxel
     os.makedirs(args.salida, exist_ok=True)
@@ -511,7 +514,8 @@ def main():
         if zonas:
             log(f"Piezas enfocadas en el iPhone: {len(zonas)}")
             mesh, n_detalle = piezas_en_detalle(meta, frames, zonas, mesh, args.lecturas)
-        pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=16, std_ratio=2.5)
+        if todos:
+            pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=16, std_ratio=2.5)
 
 
         tex_info = None
@@ -519,6 +523,7 @@ def main():
             import texturizar
             from texturizar import texture_mesh
             texturizar.AVANCE = lambda f, t: avance("fotos", f, t)
+            texturizar.EXPORTAR_OBJ = todos
             kf = [f for f in frames if f.get("kf", True)] or frames     # fotos clave (las más nítidas)
             # Modelo con fotos "completo": se vuelve a unir todo aceptando también lecturas de confianza
             # media, ángulos más inclinados y hasta 5 m. Cubre piso, objetos oscuros y lo lejano que la
@@ -578,10 +583,30 @@ def main():
         pcd.transform(M)
         mesh.compute_vertex_normals()
 
+        out = lambda n: os.path.join(args.salida, n)
+        lo, hi = np.asarray(mesh.vertices).min(0), np.asarray(mesh.vertices).max(0)
+        if not todos:
+            # solo los dos archivos que se usan: FBX (Navisworks) y 3MF (SolidWorks), ya guardados
+            rep = [
+                "Levantamiento 3D",
+                f"Cuadros: {len(frames)} recibidos, {used} usados, {dropped} borrosos descartados",
+                f"Vóxel: {args.voxel * 1000:.1f} mm · escala ×{scale:.5f}",
+                f"Extensión (X × Y × Z): {hi[0] - lo[0]:.3f} × {hi[1] - lo[1]:.3f} × {hi[2] - lo[2]:.3f} m",
+                *([f"Piezas enfocadas: {len(zonas)}; reconstruidas a 2 mm ({n_detalle:,} triángulos de detalle)."]
+                  if zonas else []),
+                "Navisworks -> obj/modelo_navisworks.fbx (junto a sus textura_*.jpg), en milímetros, Z arriba.",
+                "SolidWorks 2021+ -> modelo_solidworks.3mf (textura dentro), en milímetros, Z arriba.",
+            ]
+            if tex_info:
+                rep.append(f"Modelo con fotos: {tex_info['triangles']:,} triángulos, {tex_info['photos_used']} fotos, "
+                           f"{tex_info['coverage'] * 100:.1f} % cubierto")
+            with open(out("reporte.txt"), "w") as f:
+                f.write("\n".join(rep) + "\n")
+            log("\n".join(rep))
+            return 0
+
         pts = np.asarray(pcd.points)
         cols = (np.clip(np.asarray(pcd.colors), 0, 1) * 255).round().astype(np.uint8)
-
-        out = lambda n: os.path.join(args.salida, n)
         avance("exportar", 0.0, "Guardando la nube")
         log("Exportando nube (PLY, E57)…")
         o3d.io.write_point_cloud(out("nube_fusionada.ply"), pcd, write_ascii=False)
@@ -610,7 +635,6 @@ def main():
         stl.vertex_colors = o3d.utility.Vector3dVector()
         o3d.io.write_triangle_mesh(out("malla_solidworks.stl"), stl, write_ascii=False)
 
-        lo, hi = pts.min(0), pts.max(0)
         rep = [
             "Levantamiento 3D — fusión RGB-D",
             f"Cuadros: {len(frames)} recibidos, {used} usados, {dropped} borrosos descartados",

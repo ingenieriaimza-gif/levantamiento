@@ -366,6 +366,10 @@ def _harmonize_gains(frames, C, labels, second, K, max_pairs=400_000):
     return gains
 
 
+# El OBJ no se entrega (Navisworks usa el FBX); se puede pedir con --obj en procesar_rgbd.
+EXPORTAR_OBJ = False
+
+
 def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
     import trimesh
     from PIL import Image
@@ -412,30 +416,39 @@ def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
         vz = Vz[uk[:, 0].astype(int)]
         good = (faces[:, 0] != faces[:, 1]) & (faces[:, 1] != faces[:, 2]) & (faces[:, 0] != faces[:, 2])
         cad_parts.append((pg, vz * 1000.0, faces[good], uv_unique, tex_name))
-        obj_lines.append(f"o pagina_{pg}")
-        obj_lines += [f"v {p[0]:.2f} {p[1]:.2f} {p[2]:.2f}" for p in vz * 1000.0]   # milímetros, como el STL
-        obj_lines += [f"vt {q[0]:.6f} {q[1]:.6f}" for q in uv_unique]
-        obj_lines.append(f"usemtl pagina_{pg}")
-        ff = faces + 1 + v_off
-        obj_lines += [f"f {a}/{a} {b}/{b} {c}/{c}" for a, b, c in ff]
+        if EXPORTAR_OBJ:
+            obj_lines.append(f"o pagina_{pg}")
+            obj_lines += [f"v {p[0]:.2f} {p[1]:.2f} {p[2]:.2f}" for p in vz * 1000.0]   # milímetros, como el STL
+            obj_lines += [f"vt {q[0]:.6f} {q[1]:.6f}" for q in uv_unique]
+            obj_lines.append(f"usemtl pagina_{pg}")
+            ff = faces + 1 + v_off
+            obj_lines += [f"f {a}/{a} {b}/{b} {c}/{c}" for a, b, c in ff]
         v_off += len(verts)
 
+    # GLB y USDZ: no se entregan como archivos, pero son los que usa "Revisar 3D y medir" (PC e iPhone)
+    t1 = time.time()
     scene.export(os.path.join(out_dir, "modelo_texturizado.glb"))
+    t2 = time.time()
     try:
         _export_usdz(usd_parts, obj_dir, os.path.join(out_dir, "modelo_texturizado.usdz"))
     except ImportError:
         _log("  (sin usd-core: no se generó USDZ)")
-    with open(os.path.join(obj_dir, "modelo_texturizado.obj"), "w") as f:
-        f.write("\n".join(obj_lines) + "\n")
-    with open(os.path.join(obj_dir, "modelo_texturizado.mtl"), "w") as f:
-        f.write("\n".join(mtl_lines) + "\n")
+    t3 = time.time()
+    if EXPORTAR_OBJ:
+        with open(os.path.join(obj_dir, "modelo_texturizado.obj"), "w") as f:
+            f.write("\n".join(obj_lines) + "\n")
+        with open(os.path.join(obj_dir, "modelo_texturizado.mtl"), "w") as f:
+            f.write("\n".join(mtl_lines) + "\n")
     del obj_lines
+    t4 = time.time()
     # mismos datos para Navisworks (FBX con texturas) y SolidWorks (3MF con texturas)
     from formatos_cad import write_3mf, write_fbx
     _avance(0.9, "Guardando el modelo con fotos para Navisworks (FBX)")
     write_fbx(os.path.join(obj_dir, "modelo_navisworks.fbx"), cad_parts)
     _avance(0.95, "Guardando el modelo con fotos para SolidWorks (3MF)")
     write_3mf(os.path.join(out_dir, "modelo_solidworks.3mf"), cad_parts, obj_dir)
+    t5 = time.time()
+    _log(f"  guardado: GLB {t2 - t1:.0f} s · USDZ {t3 - t2:.0f} s · OBJ {t4 - t3:.0f} s · FBX+3MF {t5 - t4:.0f} s")
 
 
 def _export_usdz(parts, tex_dir, usdz_path):
