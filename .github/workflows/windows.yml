@@ -122,6 +122,12 @@ jobs:
           if (-not $up) { Get-Content "$PWD\prueba2\registro.txt" -ErrorAction SilentlyContinue; exit 1 }
           Invoke-RestMethod http://localhost:8765/api/version
           netsh advfirewall firewall show rule name="Levantamiento 3D" | Select-String "Puerto|Port|Programa|Program" | Select-Object -First 6
+          # borrar un escaneo desde el programa: debe irse a la Papelera de reciclaje
+          New-Item -ItemType Directory -Force "$PWD\prueba2\RGBD_borrar_prueba" | Out-Null
+          Set-Content "$PWD\prueba2\RGBD_borrar_prueba\frames.jsonl" '{"i":0}'
+          $b = curl.exe -s -H "X-Levanta: 1" -H "Content-Type: application/json" -d '{"carpeta":"RGBD_borrar_prueba"}' http://localhost:8765/api/borrar | ConvertFrom-Json
+          "Borrar: ok=$($b.ok) papelera=$($b.papelera) $($b.mensaje)"
+          if (-not $b.ok -or (Test-Path "$PWD\prueba2\RGBD_borrar_prueba")) { exit 1 }
 
       - name: Probar actualización desde archivo (librería nueva, sin internet)
         shell: pwsh

@@ -69,6 +69,10 @@
   .file-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
   .file-row > div:first-child { min-width: 0; }
   .file-title { font-weight: 600; }
+  .btn.danger { color: #ff8a80; border-color: rgba(255,138,128,.35); }
+  .btn.danger:hover { background: rgba(255,138,128,.12); }
+  .confirm-del { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid rgba(255,138,128,.35); background: rgba(255,138,128,.07); }
   .m-axes { display: flex; gap: 10px; flex-wrap: wrap; font: 12px var(--mono); font-variant-numeric: tabular-nums; }
   .m-axes .ax { padding: 1px 7px; border-radius: 6px; background: rgba(255,255,255,.06); }
   .m-axes .ax.x { color: #ff7b72; } .m-axes .ax.y { color: #7ee787; } .m-axes .ax.z { color: #79c0ff; }
@@ -762,6 +766,25 @@ async function loadScans() {
       const open = el('button', { className: 'btn', type: 'button', textContent: 'Abrir carpeta' });
       open.onclick = () => post('/api/abrir', { ruta: s.carpeta });
       actions.append(open);
+      // borrar el escaneo completo (confirmación dentro de la tarjeta; va a la Papelera de reciclaje)
+      if (!(s.en_curso && s.iphone_conectado) && !s.procesando) {
+        const del = el('button', { className: 'btn danger', type: 'button', textContent: 'Borrar escaneo' });
+        const ask = el('div', { className: 'confirm-del', hidden: true },
+          el('span', { textContent: 'Se borra todo el escaneo (fotos, modelo y archivos). Va a la Papelera de reciclaje.' }));
+        const yes = el('button', { className: 'btn danger', type: 'button', textContent: 'Sí, borrar' });
+        const no = el('button', { className: 'btn', type: 'button', textContent: 'Cancelar' });
+        ask.append(el('div', { className: 'row' }, yes, no));
+        del.onclick = () => { ask.hidden = false; del.hidden = true; };
+        no.onclick = () => { ask.hidden = true; del.hidden = false; };
+        yes.onclick = async () => {
+          yes.disabled = no.disabled = true; yes.textContent = 'Borrando…';
+          const r = await post('/api/borrar', { carpeta: s.carpeta });
+          if (r.ok) loadScans();
+          else { ask.replaceChildren(el('span', { textContent: r.mensaje })); setTimeout(loadScans, 4000); }
+        };
+        actions.append(del);
+        body.append(ask);
+      }
       list.append(el('div', { className: 'card' },
         el('div', { className: 'row' }, el('span', { className: 'scan-title', textContent: s.nombre }),
           el('span', { className: 'muted', textContent: s.fecha })), pills, body, actions));

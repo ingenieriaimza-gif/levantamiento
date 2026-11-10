@@ -218,6 +218,24 @@ def _asset(release, name):
     return None
 
 
+def _to_trash(path):
+    """Manda una carpeta a la Papelera de reciclaje de Windows. Devuelve True si fue a la papelera."""
+    if sys.platform.startswith("win"):
+        ps = ("Add-Type -AssemblyName Microsoft.VisualBasic; "
+              "[Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($env:LEVANTA_BORRAR, "
+              "'OnlyErrorDialogs', 'SendToRecycleBin')")
+        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+                           env=dict(os.environ, LEVANTA_BORRAR=path), capture_output=True, text=True,
+                           timeout=600, creationflags=0x08000000)
+        if r.returncode == 0 and not os.path.exists(path):
+            return True
+        if os.path.exists(path):
+            raise RuntimeError((r.stderr or r.stdout or "la papelera no respondió").strip()[-300:])
+        return True
+    shutil.rmtree(path)
+    return False
+
+
 def _html_de(res):
     """Nombre del archivo HTML de la vista foto-realista en resultado/, o None."""
     try:
@@ -417,6 +435,26 @@ class Gestion:
         else:
             open_path(p)
         return web.json_response({"ok": True})
+
+    async def borrar(self, request):
+        """Borra un escaneo completo: en Windows va a la Papelera de reciclaje (se puede recuperar)."""
+        data = await request.json()
+        d = self._safe(data.get("carpeta", ""))
+        if os.path.normpath(d) == os.path.normpath(self.root) or not os.path.isdir(d):
+            return web.json_response({"ok": False, "mensaje": "No se encontró el escaneo"})
+        sess = self.server.session
+        if sess is not None and os.path.normpath(sess.dir) == os.path.normpath(d):
+            return web.json_response({"ok": False, "mensaje": "Este escaneo sigue abierto; termínalo o descártalo primero"})
+        if self.server.status.get("procesando") and \
+                os.path.normpath(getattr(self.server, "processing_dir", "") or "") == os.path.normpath(d):
+            return web.json_response({"ok": False, "mensaje": "La PC está trabajando en este escaneo; espera a que termine"})
+        loop = asyncio.get_running_loop()
+        try:
+            papelera = await loop.run_in_executor(None, _to_trash, d)
+        except Exception as e:      # noqa: BLE001
+            return web.json_response({"ok": False, "mensaje": f"No se pudo borrar: {e}"})
+        return web.json_response({"ok": True, "papelera": papelera,
+                                  "mensaje": "Enviado a la Papelera de reciclaje" if papelera else "Borrado"})
 
     async def reprocesar(self, request):
         data = await request.json()
@@ -926,6 +964,7 @@ class Gestion:
         app.router.add_get("/api/escaneos", self.escaneos)
         app.router.add_post("/api/abrir", self.abrir)
         app.router.add_post("/api/reprocesar", self.reprocesar)
+        app.router.add_post("/api/borrar", self.borrar)
         app.router.add_get("/api/version", self.version)
         app.router.add_get("/api/actualizaciones", self.buscar)
         app.router.add_post("/api/actualizar_pc", self.actualizar_pc)
