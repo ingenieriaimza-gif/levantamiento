@@ -345,6 +345,7 @@ class Server:
 
     async def final_processing(self, sdir, escala=None):
         self.status["procesando"] = True
+        self.processing_dir = sdir
         out = os.path.join(sdir, "resultado")
         py = PYTHON
         from gestion import ia_config, ia_instalada

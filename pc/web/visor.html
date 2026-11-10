@@ -54,6 +54,12 @@
   .pill.ok { color: var(--ok); border-color: rgba(63,207,110,.4); }
   .pill.warn { color: var(--accent); border-color: rgba(245,165,36,.4); }
   .files { display: flex; gap: 8px; flex-wrap: wrap; }
+  .scan-body { display: flex; flex-direction: column; gap: 10px; }
+  .file-group { display: flex; flex-direction: column; gap: 6px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .file-group h4 { margin: 0; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  .file-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .file-row > div:first-child { min-width: 0; }
+  .file-title { font-weight: 600; }
   .files button { font-family: var(--mono); font-size: 12px; }
   .ver { font: 600 28px var(--mono); }
   #upd-msg { min-height: 1.4em; }
@@ -141,7 +147,7 @@
         <button class="btn" id="set-root" type="button">Usar esta ruta</button></div>
       <div id="root-msg" class="muted"></div>
     </div>
-    <div id="scan-list" class="wrap"></div>
+    <div id="scan-list" class="wrap" style="width:100%"></div>
   </div>
 </section>
 
@@ -521,40 +527,86 @@ async function loadScans() {
       return;
     }
     for (const s of d.escaneos) {
+      const has = (n) => s.archivos.some(f => f.nombre === n);
+      const ruta = (n) => `${s.carpeta}/resultado/${n}`;
       const pills = el('div', { className: 'row' });
       pills.append(el('span', { className: 'pill', textContent: `${s.cuadros} cuadros` }));
-      if (s.en_curso) pills.append(el('span', { className: 'pill warn', textContent: 'escaneo en curso' }));
-      else if (s.descartado) pills.append(el('span', { className: 'pill', textContent: 'descartado' }));
-      else if (s.procesado) pills.append(el('span', { className: 'pill ok', textContent: 'procesado' }));
-      else pills.append(el('span', { className: 'pill warn', textContent: 'sin procesar' }));
-      if (s.splat) pills.append(el('span', { className: 'pill ok', textContent: 'listo para Brush' }));
-      const files = el('div', { className: 'files' });
-      for (const f of s.archivos) {
-        const b = el('button', { className: 'btn', type: 'button', textContent: `${f.nombre} · ${f.mb} MB` });
-        b.onclick = () => post('/api/abrir', { ruta: `${s.carpeta}/resultado/${f.nombre}` });
-        files.append(b);
-      }
+      const body = el('div', { className: 'scan-body' });
       const actions = el('div', { className: 'row' });
-      if (s.archivos.some(f => f.nombre === 'modelo_texturizado.glb')) {
-        const v3 = el('button', { className: 'btn primary', type: 'button', textContent: 'Revisar 3D' });
-        v3.onclick = () => openScan(s.carpeta, s.nombre);
-        actions.append(v3);
+
+      const crear = (texto) => {
+        const b = el('button', { className: 'btn primary', type: 'button', textContent: texto });
+        b.onclick = async () => {
+          b.disabled = true; b.textContent = 'Creando el modelo… (unos minutos)';
+          const r = await post('/api/reprocesar', { carpeta: s.carpeta });
+          if (!r.ok) { b.disabled = false; b.textContent = texto; body.append(el('div', { className: 'muted', textContent: r.mensaje })); }
+          else setTimeout(loadScans, 1500);
+        };
+        return b;
+      };
+
+      if (s.descartado) {
+        pills.append(el('span', { className: 'pill', textContent: 'descartado' }));
+      } else if (s.procesando) {
+        pills.append(el('span', { className: 'pill warn', textContent: 'creando el modelo 3D…' }));
+        body.append(el('div', { className: 'muted', textContent: 'La PC está convirtiendo lo que mandó el iPhone en el modelo 3D. Tarda unos minutos; el avance se ve en la pestaña Visor.' }));
+      } else if (s.en_curso && s.iphone_conectado) {
+        pills.append(el('span', { className: 'pill warn', textContent: 'escaneando' }));
+        body.append(el('div', { className: 'muted', textContent: 'Cuando termines, en el iPhone toca "Terminar y procesar en la PC".' }));
+      } else if (s.en_curso) {
+        pills.append(el('span', { className: 'pill warn', textContent: 'sin terminar' }));
+        body.append(el('div', { className: 'muted', textContent: 'El iPhone se desconectó antes de terminar. Lo recibido está guardado: puedes crear el modelo con eso.' }));
+        actions.append(crear('Terminar y crear el modelo 3D'));
+      } else if (!s.con_modelo) {
+        pills.append(el('span', { className: 'pill warn', textContent: s.procesado ? 'el modelo no se terminó' : 'falta crear el modelo' }));
+        body.append(el('div', { className: 'muted', textContent: 'Aquí solo están las fotos y medidas del iPhone. "Crear modelo 3D" las convierte en los archivos para Navisworks y SolidWorks.' }));
+        actions.append(crear('Crear modelo 3D'));
+      } else {
+        pills.append(el('span', { className: 'pill ok', textContent: 'modelo listo' }));
+        const fileRow = (titulo, nota, nombre, etiqueta) => {
+          if (!has(nombre)) return null;
+          const f = s.archivos.find(x => x.nombre === nombre);
+          const abrir = el('button', { className: 'btn mini', type: 'button', textContent: 'Abrir' });
+          abrir.onclick = () => post('/api/abrir', { ruta: ruta(nombre) });
+          const ver = el('button', { className: 'btn mini', type: 'button', textContent: 'Mostrar en carpeta' });
+          ver.onclick = () => post('/api/abrir', { ruta: ruta(nombre), mostrar: true });
+          return el('div', { className: 'file-row' },
+            el('div', {}, el('div', { className: 'file-title', textContent: titulo }),
+              el('div', { className: 'muted', textContent: `${nota} · ${etiqueta || nombre} · ${f.mb} MB` })),
+            el('div', { className: 'row' }, abrir, ver));
+        };
+        const grupo = (titulo, ...rows) => {
+          rows = rows.filter(Boolean);
+          if (rows.length) body.append(el('div', { className: 'file-group' }, el('h4', { textContent: titulo }), ...rows));
+        };
+        grupo('Navisworks (interferencias)',
+          fileRow('Malla del espacio', 'superficies para Clash Detective; en milímetros', 'malla_solidworks.stl'),
+          fileRow('Nube de puntos con color', 'se ve como fotos; en metros', 'nube_navisworks.pts'));
+        grupo('SolidWorks',
+          fileRow('Malla del espacio', 'Insertar › Componente; en milímetros', 'malla_solidworks.stl'));
+        grupo('Otros',
+          fileRow('Modelo con fotos', 'para el iPhone (Vista rápida) o AR', 'modelo_texturizado.usdz'),
+          fileRow('Nube E57', 'para ReCap u otros programas', 'nube_fusionada.e57'),
+          fileRow('Reporte', 'medidas generales y datos del proceso', 'reporte.txt'));
+        if (has('modelo_texturizado.glb')) {
+          const v3 = el('button', { className: 'btn primary', type: 'button', textContent: 'Revisar 3D y medir' });
+          v3.onclick = () => openScan(s.carpeta, s.nombre);
+          actions.append(v3);
+        }
+        const rp = el('button', { className: 'btn', type: 'button', textContent: 'Crear el modelo de nuevo' });
+        rp.title = 'Vuelve a calcular el modelo con lo que mandó el iPhone (por ejemplo, después de calibrar la escala)';
+        rp.onclick = async () => {
+          const r = await post('/api/reprocesar', { carpeta: s.carpeta });
+          rp.textContent = r.ok ? 'Creando… (unos minutos)' : r.mensaje; rp.disabled = true;
+        };
+        actions.append(rp);
       }
       const open = el('button', { className: 'btn', type: 'button', textContent: 'Abrir carpeta' });
       open.onclick = () => post('/api/abrir', { ruta: s.carpeta });
       actions.append(open);
-      if (!s.descartado && !s.en_curso) {
-        const rp = el('button', { className: 'btn', type: 'button', textContent: s.procesado ? 'Procesar de nuevo' : 'Procesar' });
-        rp.onclick = async () => {
-          const r = await post('/api/reprocesar', { carpeta: s.carpeta });
-          rp.textContent = r.ok ? 'Procesando… (ver el registro en Visor)' : r.mensaje;
-          rp.disabled = true;
-        };
-        actions.append(rp);
-      }
       list.append(el('div', { className: 'card' },
         el('div', { className: 'row' }, el('span', { className: 'scan-title', textContent: s.nombre }),
-          el('span', { className: 'muted', textContent: s.fecha })), pills, files, actions));
+          el('span', { className: 'muted', textContent: s.fecha })), pills, body, actions));
     }
   } catch (e) {
     list.replaceChildren(el('div', { className: 'card', textContent: 'No se pudo leer la carpeta de escaneos.' }));

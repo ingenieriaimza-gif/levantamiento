@@ -4,7 +4,8 @@ Fusión RGB-D de paquetes grabados por la app 3D (formato "levanta-rgbd").
 
 Lee una o varias partes (.zip o carpetas), fusiona todos los cuadros en un volumen TSDF
 y exporta:
-  nube_fusionada.e57   nube con color, metros, Z arriba  -> ReCap / Navisworks
+  nube_navisworks.pts  nube con color, metros, Z arriba  -> Navisworks (Agregar), sin ReCap
+  nube_fusionada.e57   nube con color, metros, Z arriba  -> ReCap
   nube_fusionada.ply   igual, en PLY binario
   malla_color.ply      malla con color por vértice, metros, Z arriba
   malla_solidworks.stl malla en milímetros, Z arriba (reducida para SolidWorks)
@@ -273,6 +274,18 @@ def write_e57(path, pts, cols):
     e.close()
 
 
+def write_pts(path, pts, cols):
+    """Nube Leica PTS (texto): Navisworks la abre directo. x y z intensidad r g b, en metros."""
+    with open(path, "w", encoding="ascii", newline="\n") as f:
+        f.write(f"{len(pts)}\n")
+        step = 500_000
+        for i in range(0, len(pts), step):
+            p, c = pts[i:i + step], cols[i:i + step].astype(int)
+            lines = [f"{a:.4f} {b:.4f} {z:.4f} 0 {r} {g} {bl}"
+                     for (a, b, z), (r, g, bl) in zip(p.tolist(), c.tolist())]
+            f.write("\n".join(lines) + "\n")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Fusión RGB-D de la app 3D")
     ap.add_argument("entradas", nargs="+", help="partes .zip o carpetas del paquete")
@@ -355,6 +368,8 @@ def main():
         log("Exportando nube (PLY, E57)…")
         o3d.io.write_point_cloud(out("nube_fusionada.ply"), pcd, write_ascii=False)
         write_e57(out("nube_fusionada.e57"), pts, cols)
+        log("Exportando nube para Navisworks (PTS)…")
+        write_pts(out("nube_navisworks.pts"), pts, cols)
         log("Exportando malla (PLY, STL)…")
         o3d.io.write_triangle_mesh(out("malla_color.ply"), mesh, write_ascii=False)
         gc.collect()

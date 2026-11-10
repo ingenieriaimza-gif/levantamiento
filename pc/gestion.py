@@ -308,7 +308,7 @@ class Gestion:
                 files = []
                 if os.path.isdir(res):
                     for fn in ("modelo_texturizado.usdz", "nube_fusionada.e57", "malla_solidworks.stl",
-                               "modelo_texturizado.glb", "reporte.txt"):
+                               "nube_navisworks.pts", "modelo_texturizado.glb", "reporte.txt"):
                         p = os.path.join(res, fn)
                         if os.path.exists(p):
                             files.append({"nombre": fn, "mb": round(os.path.getsize(p) / 1e6, 1)})
@@ -319,8 +319,13 @@ class Gestion:
                 except OSError:
                     pass
                 live = self.server.session is not None and os.path.normpath(self.server.session.dir) == os.path.normpath(d)
+                processing = (self.server.status.get("procesando") and
+                              os.path.normpath(getattr(self.server, "processing_dir", "") or "") == os.path.normpath(d))
                 items.append({
                     "en_curso": live,
+                    "iphone_conectado": self.server.phone is not None,
+                    "procesando": bool(processing),
+                    "con_modelo": any(f["nombre"] == "malla_solidworks.stl" for f in files),
                     "nombre": name.replace("RGBD_", ""),
                     "carpeta": name,
                     "fecha": datetime.fromtimestamp(os.path.getmtime(d)).strftime("%Y-%m-%d %H:%M"),
@@ -379,16 +384,25 @@ class Gestion:
 
     async def abrir(self, request):
         data = await request.json()
-        open_path(self._safe(data.get("ruta", "")))
+        p = self._safe(data.get("ruta", ""))
+        if data.get("mostrar") and sys.platform.startswith("win"):
+            subprocess.Popen(["explorer", "/select,", p])      # carpeta con el archivo seleccionado
+        else:
+            open_path(p)
         return web.json_response({"ok": True})
 
     async def reprocesar(self, request):
         data = await request.json()
         d = self._safe(data.get("carpeta", ""))
-        if self.server.session is not None and os.path.normpath(self.server.session.dir) == os.path.normpath(d):
-            return web.json_response({"ok": False, "mensaje": "Este escaneo sigue en curso: termínalo desde el iPhone"})
         if self.server.status.get("procesando"):
-            return web.json_response({"ok": False, "mensaje": "Ya hay un procesamiento en curso"})
+            return web.json_response({"ok": False, "mensaje": "Ya se está creando otro modelo; espera a que termine"})
+        sess = self.server.session
+        if sess is not None and os.path.normpath(sess.dir) == os.path.normpath(d):
+            if self.server.phone is not None:
+                return web.json_response({"ok": False, "mensaje": "El iPhone sigue conectado: termínalo desde el iPhone"})
+            # el iPhone se desconectó sin terminar: se cierra aquí y se crea el modelo con lo recibido
+            self.server.session = None
+            await asyncio.get_running_loop().run_in_executor(self.server.pool, sess.close)
         escala = data.get("escala")
         try:
             escala = float(escala) if escala else None
