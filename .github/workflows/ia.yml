@@ -6,6 +6,7 @@ on:
     paths:
       - "tools/ia_profundidad.py"
       - "tools/procesar_rgbd.py"
+      - "tools/diagnostico_ia.py"
       - "pc/gestion.py"
       - ".github/workflows/ia.yml"
   workflow_dispatch:
@@ -42,3 +43,16 @@ jobs:
           echo "=== Exactitud contra la geometría real ==="
           python -I ../tools/evaluar_sintetico.py sin_ia escena_real.ply
           python -I ../tools/evaluar_sintetico.py con_ia escena_real.ply
+      - name: Diagnóstico por cuadro (IA contra geometría exacta)
+        run: |
+          cd sim
+          python -I ../tools/diagnostico_ia.py paquete escena_real.ply 8
+      - name: Variantes del resguardo
+        run: |
+          cd sim
+          for v in "0.01 0" "0.005 0" "0.005 1" "0.003 0"; do
+            set -- $v
+            RGBD_IA_TOL=$1 RGBD_IA_RELLENO=$2 python -I ../tools/procesar_rgbd.py paquete --salida var_$1_$2 --conf 2 --lecturas 2 --sin-textura --ia > /dev/null 2>&1
+            printf "tol=%s relleno=%s  " $1 $2
+            python -I ../tools/evaluar_sintetico.py var_$1_$2 escena_real.ply
+          done

@@ -78,8 +78,14 @@ class RefinadorIA:
         return res[0]["predicted_depth"].float().cpu().numpy().astype(np.float32)
 
 
-def combinar(ia_m, lidar_mm, conf, tol_abs=0.01, tol_rel=0.01, min_conf=2, max_hueco_px=6,
-             max_dispersion=0.015):
+# parámetros del resguardo (se pueden ajustar para pruebas con variables de entorno)
+TOL_ABS = float(os.environ.get("RGBD_IA_TOL", "0.01"))
+RELLENAR = os.environ.get("RGBD_IA_RELLENO", "1") == "1"
+MAX_DISP = float(os.environ.get("RGBD_IA_DISP", "0.015"))
+
+
+def combinar(ia_m, lidar_mm, conf, tol_abs=None, tol_rel=0.01, min_conf=2, max_hueco_px=6,
+             max_dispersion=None, rellenar=None):
     """
     Combina la profundidad de la IA (alta resolución, metros) con la del LiDAR (baja resolución, mm).
 
@@ -91,6 +97,9 @@ def combinar(ia_m, lidar_mm, conf, tol_abs=0.01, tol_rel=0.01, min_conf=2, max_h
 
     Devuelve (profundidad_mm uint16 a la resolución de la IA, fracción de píxeles donde aportó la IA).
     """
+    tol_abs = TOL_ABS if tol_abs is None else tol_abs
+    max_dispersion = MAX_DISP if max_dispersion is None else max_dispersion
+    rellenar = RELLENAR if rellenar is None else rellenar
     H, W = ia_m.shape
     lid = lidar_mm.astype(np.float32) / 1000.0
     ok = lidar_mm > 0
@@ -127,7 +136,7 @@ def combinar(ia_m, lidar_mm, conf, tol_abs=0.01, tol_rel=0.01, min_conf=2, max_h
     # 3) huecos pequeños del LiDAR cerca de lecturas válidas
     near = cv2.dilate(ok.astype(np.uint8), np.ones((2 * max_hueco_px + 1,) * 2, np.uint8)) > 0
     near_up = cv2.resize(near.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST) > 0
-    fill = (~ok_up) & near_up & np.isfinite(ia_al) & (ia_al > 0.15)
+    fill = (~ok_up) & near_up & np.isfinite(ia_al) & (ia_al > 0.15) & bool(rellenar)
 
     # en bordes (saltos de profundidad del LiDAR) el LiDAR mezcla frente y fondo: si la IA no
     # coincide ahí, mejor dejar sin dato que usar el borde borroso del LiDAR
