@@ -229,33 +229,53 @@ final class FocusController: ObservableObject {
     }
 }
 
-/// Fichas de las piezas enfocadas (con ✕ para quitarlas) y el aviso de guía.
+/// Indicación (acércate / aléjate / lista), fichas de las piezas con su avance y ✕ para quitarlas.
 struct FocusBar: View {
     @ObservedObject var focus: FocusController
-    let guide: String?
+    let guide: ScanGuide?
+    let progress: [String: Int]
+    @Binding var voice: Bool
+    let scanning: Bool
+
+    private let amber = Color(red: 0.96, green: 0.66, blue: 0.13)
+    private let green = Color(red: 0.20, green: 0.78, blue: 0.42)
 
     var body: some View {
         VStack(spacing: 6) {
-            if let m = focus.message ?? guide {
-                Text(m)
-                    .font(.footnote.weight(.semibold))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: Capsule())
+            if let m = focus.message {
+                pill(m, icon: "scope", bg: AnyShapeStyle(.ultraThinMaterial), fg: .white)
+            } else if let g = guide {
+                HStack(spacing: 8) {
+                    switch g.kind {
+                    case .closer: pill(g.text, icon: "arrow.up.forward.circle.fill", bg: AnyShapeStyle(amber.opacity(0.95)), fg: .black, big: true)
+                    case .farther: pill(g.text, icon: "arrow.down.backward.circle.fill", bg: AnyShapeStyle(amber.opacity(0.95)), fg: .black, big: true)
+                    case .ready: pill(g.text, icon: "checkmark.seal.fill", bg: AnyShapeStyle(green.opacity(0.95)), fg: .black, big: true)
+                    case .ok: pill(g.text, icon: "hand.thumbsup.fill", bg: AnyShapeStyle(.ultraThinMaterial), fg: .white)
+                    }
+                    voiceButton
+                }
+            } else if scanning {
+                HStack(spacing: 8) {
+                    pill("Toca una pieza para enfocarla en detalle", icon: "hand.tap.fill",
+                         bg: AnyShapeStyle(.ultraThinMaterial), fg: .white)
+                    voiceButton
+                }
             }
             if !focus.zones.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 8) {
                         ForEach(focus.zones) { z in
+                            let p = progress[z.id] ?? 0
+                            let done = p >= 100
                             HStack(spacing: 6) {
-                                Image(systemName: "scope")
-                                Text(z.name)
+                                Image(systemName: done ? "checkmark.circle.fill" : "scope")
+                                Text(done ? "\(z.name) lista" : "\(z.name) · \(p) %")
                                 Button { focus.remove(z.id) } label: { Image(systemName: "xmark.circle.fill") }
                                     .accessibilityLabel("Quitar \(z.name)")
                             }
-                            .font(.caption.weight(.semibold))
+                            .font(.caption.weight(.semibold).monospacedDigit())
                             .padding(.horizontal, 10).padding(.vertical, 6)
-                            .background(Color(red: 0.96, green: 0.66, blue: 0.13).opacity(0.9), in: Capsule())
+                            .background((done ? green : amber).opacity(0.9), in: Capsule())
                             .foregroundStyle(.black)
                         }
                     }
@@ -264,5 +284,25 @@ struct FocusBar: View {
             }
         }
         .foregroundStyle(.white)
+        .animation(.easeInOut(duration: 0.2), value: guide?.kind)
+    }
+
+    private var voiceButton: some View {
+        Button { voice.toggle() } label: {
+            Image(systemName: voice ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                .font(.footnote.weight(.bold))
+                .frame(width: 34, height: 34)
+                .background(.ultraThinMaterial, in: Circle())
+        }
+        .accessibilityLabel(voice ? "Silenciar indicaciones" : "Decir indicaciones en voz alta")
+    }
+
+    private func pill(_ text: String, icon: String, bg: AnyShapeStyle, fg: Color, big: Bool = false) -> some View {
+        Label(text, systemImage: icon)
+            .font(big ? .subheadline.weight(.bold) : .footnote.weight(.semibold))
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 14).padding(.vertical, big ? 10 : 8)
+            .background(bg, in: Capsule())
+            .foregroundStyle(fg)
     }
 }

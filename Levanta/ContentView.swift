@@ -29,9 +29,10 @@ struct ContentView: View {
                     QualityLegend()
                 }
                 FocusBar(focus: engine.focus,
-                         guide: engine.isScanning
-                            ? (engine.focusGuide ?? (engine.focus.zones.isEmpty ? "Toca una pieza para enfocarla en detalle" : nil))
-                            : nil)
+                         guide: engine.isScanning ? engine.guide : nil,
+                         progress: engine.zoneProgress,
+                         voice: $engine.voiceGuide,
+                         scanning: engine.isScanning)
                 Spacer()
                 if engine.isScanning && engine.personInView {
                     Label("Persona detectada: se ignora", systemImage: "person.fill.xmark")
@@ -41,7 +42,7 @@ struct ContentView: View {
                         .foregroundStyle(.black)
                         .transition(.opacity)
                 }
-                if engine.isScanning && engine.holdingStill && !engine.tooFast {
+                if engine.isScanning && engine.holdingStill && !engine.tooFast && engine.guide?.kind != .ready {
                     Label("Sin movimiento: en pausa hasta que te muevas", systemImage: "pause.circle.fill")
                         .font(.footnote.weight(.semibold))
                         .padding(.horizontal, 14).padding(.vertical, 8)
@@ -100,7 +101,8 @@ struct ContentView: View {
         let color: Color
         let hint: String
         if let d {
-            if d <= 1.5 { color = .green; hint = "precisión alta" }
+            if d < 0.25 { color = .red; hint = "muy cerca · aléjate" }
+            else if d <= 1.5 { color = .green; hint = "precisión alta" }
             else if d <= 3.0 { color = accent; hint = "precisión media" }
             else { color = .red; hint = "muy lejos" }
         } else {
