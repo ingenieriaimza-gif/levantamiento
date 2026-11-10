@@ -105,7 +105,8 @@
     <div class="stat"><b id="tris">0</b><span>triángulos en vivo</span></div>
   </div>
   <div id="viewbtns" class="panel">
-    <button class="btn" id="measure-btn" type="button">Medir</button>
+    <button class="btn primary" id="review-btn" type="button">Revisar 3D</button>
+    <button class="btn" id="measure-btn" type="button" hidden>Medir</button>
     <button class="btn" id="fit" type="button">Encuadrar</button>
     <button class="btn" id="top-view" type="button">Planta</button>
   </div>
@@ -113,7 +114,7 @@
     <button class="btn mini" id="back-live" type="button">Volver a en vivo</button></div>
   <div id="meas" class="panel">
     <h3>Medidas</h3>
-    <div id="meas-empty" class="muted">Pulsa <b>Medir</b> y haz clic en dos puntos del modelo. Las medidas hechas en el iPhone aparecen aquí también.</div>
+    <div id="meas-empty" class="muted">Para medir abre <b>Revisar 3D</b> (el modelo ya procesado), pulsa <b>Medir</b> y haz clic en dos puntos. Las medidas hechas en Revisar 3D del iPhone aparecen aquí también.</div>
     <div id="meas-scale" class="m-sub" hidden></div>
     <div id="meas-list" style="display:flex;flex-direction:column;gap:8px"></div>
     <div class="row" id="meas-actions" hidden>
@@ -472,7 +473,8 @@ async function openScan(carpeta, nombre) {
     scene.add(model);
     viewing = carpeta;
     if (mesh) mesh.visible = false;
-    $('viewing').hidden = false; $('viewing-name').textContent = `Escaneo ${nombre}`;
+    $('viewing').hidden = false; $('viewing-name').textContent = `Revisar 3D · ${nombre}`;
+    $('measure-btn').hidden = false; $('review-btn').hidden = true;
     const d = await fetch('/api/medidas/' + encodeURIComponent(carpeta)).then(r => r.json()).catch(() => ({ medidas: [] }));
     measures = d.medidas || [];
     renderList(); drawMeasures(); fit(); setHint(measuring ? 'Clic en el primer punto' : '');
@@ -482,10 +484,22 @@ $('back-live').onclick = () => {
   if (model) { scene.remove(model); model = null; }
   viewing = 'vivo'; $('viewing').hidden = true;
   if (mesh) mesh.visible = true;
+  measuring = false; pending = null; $('measure-btn').classList.remove('on'); setHint('');
+  $('measure-btn').hidden = true; $('review-btn').hidden = false;
   measures = measures.filter(m => m.origen === 'iphone');
   renderList(); drawMeasures(); fit();
 };
 renderList();
+
+// Revisar 3D desde el visor: abre el último escaneo procesado
+$('review-btn').onclick = async () => {
+  try {
+    const d = await fetch('/api/escaneos').then(r => r.json());
+    const s = (d.escaneos || []).find(x => !x.en_curso && x.archivos.some(f => f.nombre === 'modelo_texturizado.glb'));
+    if (s) openScan(s.carpeta, s.nombre);
+    else setHint('Todavía no hay un escaneo procesado. Termina un escaneo en el iPhone (Terminar en la PC) y espera a que se procese.');
+  } catch (e) { setHint('No se pudo leer la carpeta de escaneos.'); }
+};
 
 // ---------- escaneos
 function el(tag, props = {}, ...kids) {
@@ -522,7 +536,7 @@ async function loadScans() {
       }
       const actions = el('div', { className: 'row' });
       if (s.archivos.some(f => f.nombre === 'modelo_texturizado.glb')) {
-        const v3 = el('button', { className: 'btn primary', type: 'button', textContent: 'Ver en 3D y medir' });
+        const v3 = el('button', { className: 'btn primary', type: 'button', textContent: 'Revisar 3D' });
         v3.onclick = () => openScan(s.carpeta, s.nombre);
         actions.append(v3);
       }

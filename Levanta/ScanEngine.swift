@@ -125,7 +125,6 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             if self.isScanning { self.link.sendStart(name: self.currentSessionName()) }
             if !self.measure.measures.isEmpty { self.sendMeasures(self.measure.measures) }
         }
-        measure.attach(view)
         measure.onChange = { [weak self] list in self?.sendMeasures(list) }
         view.session.delegate = self
         view.session.delegateQueue = queue
@@ -201,6 +200,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             link.send(d, important: true)            // la PC descarta lo recibido de este escaneo
         }
         isScanning = false
+        measure.clear()
         pointCount = 0
         pointsNode.geometry = nil
         liveMeshNode.geometry = nil
@@ -522,13 +522,33 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     /// Geometría y resumen para la revisión 3D fuera de la cámara.
-    func makeReviewData(mode: ColorMode, completion: @escaping (SCNGeometry?, CloudStats) -> Void) {
+    /// También devuelve los puntos confiables (para tocar y medir sobre ellos).
+    func makeReviewData(mode: ColorMode,
+                        completion: @escaping (SCNGeometry?, CloudStats, [SIMD3<Float>]) -> Void) {
         queue.async {
             let geometry = self.buildGeometry(mode: mode, maxPoints: 1_500_000,
                                               pointSize: 4, maxRadius: 3)
             let stats = self.computeStats()
-            DispatchQueue.main.async { completion(geometry, stats) }
+            let pick = self.reliablePoints(maxPoints: 1_500_000)
+            DispatchQueue.main.async { completion(geometry, stats, pick) }
         }
+    }
+
+    /// Puntos con suficientes lecturas (los mismos que se guardan), promediados por vóxel.
+    private func reliablePoints(maxPoints: Int) -> [SIMD3<Float>] {
+        let n = sums.count
+        guard n > 0 else { return [] }
+        let minObs = activeMinObs
+        var out: [SIMD3<Float>] = []
+        out.reserveCapacity(min(n, maxPoints))
+        let step = max(1, n / maxPoints)
+        var i = 0
+        while i < n {
+            let c = counts[i]
+            if c >= minObs { out.append(sums[i] / Float(c)) }
+            i += step
+        }
+        return out
     }
 
     private func computeStats() -> CloudStats {

@@ -1,9 +1,11 @@
 import SwiftUI
 import SceneKit
 
-/// Revisión 3D de la nube fuera de la cámara: se gira con un dedo, se acerca con dos.
+/// Revisión 3D de la nube fuera de la cámara: se gira con un dedo, se acerca con dos,
+/// y con "Medir" se toca un punto y luego otro para sacar la distancia.
 struct ReviewView: View {
     @ObservedObject var engine: ScanEngine
+    @ObservedObject var measure: MeasureController
     @Environment(\.dismiss) private var dismiss
 
     @State private var mode: ScanEngine.ColorMode = .coverage
@@ -11,6 +13,12 @@ struct ReviewView: View {
     @State private var stats: ScanEngine.CloudStats?
     @State private var loading = true
     @State private var view: ReviewCamera = .perspective
+    @State private var pickPoints: [SIMD3<Float>] = []
+
+    init(engine: ScanEngine) {
+        _engine = ObservedObject(wrappedValue: engine)
+        _measure = ObservedObject(wrappedValue: engine.measure)
+    }
 
     enum ReviewCamera { case perspective, top, front }
 
@@ -19,7 +27,8 @@ struct ReviewView: View {
             Color.black.ignoresSafeArea()
 
             if let geometry, let stats {
-                CloudSceneView(geometry: geometry, center: stats.center, size: stats.size, camera: view)
+                CloudSceneView(geometry: geometry, center: stats.center, size: stats.size, camera: view,
+                               points: pickPoints, measure: measure)
                     .ignoresSafeArea()
             } else if !loading {
                 Text("No hay puntos todavía.")
@@ -36,6 +45,17 @@ struct ReviewView: View {
                     .pickerStyle(.segmented)
                     .frame(maxWidth: 240)
                     Spacer()
+                    Button {
+                        measure.active.toggle()
+                    } label: {
+                        Label("Medir", systemImage: "ruler")
+                            .font(.subheadline.weight(.semibold))
+                            .padding(.horizontal, 14).padding(.vertical, 8)
+                            .background(measure.active ? AnyShapeStyle(Color(red: 0.96, green: 0.66, blue: 0.13))
+                                                       : AnyShapeStyle(.ultraThinMaterial), in: Capsule())
+                            .foregroundStyle(measure.active ? Color.black : Color.white)
+                    }
+                    .disabled(pickPoints.isEmpty)
                     Button("Cerrar") { dismiss() }
                         .font(.subheadline.weight(.semibold))
                         .padding(.horizontal, 14).padding(.vertical, 8)
@@ -44,7 +64,9 @@ struct ReviewView: View {
 
                 Spacer()
 
-                if let stats, stats.points > 0 {
+                if measure.active {
+                    MeasurePanel(measure: measure)
+                } else if let stats, stats.points > 0 {
                     statsPanel(stats)
                 }
 
@@ -59,14 +81,17 @@ struct ReviewView: View {
             .foregroundStyle(.white)
         }
         .onAppear(perform: load)
+        .onDisappear { measure.active = false }
         .onChange(of: mode) { _, _ in load() }
     }
 
     private func load() {
         loading = true
-        engine.makeReviewData(mode: mode) { geo, st in
+        engine.makeReviewData(mode: mode) { geo, st, pts in
             geometry = geo
             stats = st
+            pickPoints = pts
+            measure.markScale = max(1, min(4, max(st.size.x, max(st.size.y, st.size.z)) / 2))
             loading = false
         }
     }
@@ -119,6 +144,8 @@ struct CloudSceneView: UIViewRepresentable {
     let center: SIMD3<Float>
     let size: SIMD3<Float>
     let camera: ReviewView.ReviewCamera
+    let points: [SIMD3<Float>]
+    let measure: MeasureController
 
     func makeUIView(context: Context) -> SCNView {
         let v = SCNView(frame: .zero)
@@ -129,6 +156,11 @@ struct CloudSceneView: UIViewRepresentable {
         let cloud = SCNNode(geometry: geometry)
         cloud.name = "cloud"
         v.scene?.rootNode.addChildNode(cloud)
+        measure.root.removeFromParentNode()
+        v.scene?.rootNode.addChildNode(measure.root)
+        let tap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.tapped(_:)))
+        v.addGestureRecognizer(tap)
+        context.coordinator.view = v
         let camNode = SCNNode()
         camNode.camera = SCNCamera()
         camNode.camera?.zNear = 0.01
@@ -146,13 +178,27 @@ struct CloudSceneView: UIViewRepresentable {
            cloud.geometry !== geometry {
             cloud.geometry = geometry
         }
+        context.coordinator.points = points
+        context.coordinator.measure = measure
         apply(to: v, coordinator: context.coordinator)
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    final class Coordinator {
+    final class Coordinator: NSObject {
         var lastCamera: ReviewView.ReviewCamera?
+        weak var view: SCNView?
+        var points: [SIMD3<Float>] = []
+        weak var measure: MeasureController?
+
+        @objc func tapped(_ g: UITapGestureRecognizer) {
+            guard let v = view, let m = measure, m.active else { return }
+            if let p = PointPicker.pick(at: g.location(in: v), in: v, points: points) {
+                m.tap(p)
+            } else {
+                m.missed = true
+            }
+        }
     }
 
     private func apply(to v: SCNView, coordinator: Coordinator) {

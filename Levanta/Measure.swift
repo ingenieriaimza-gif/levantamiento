@@ -1,9 +1,9 @@
-import ARKit
 import SceneKit
 import SwiftUI
+import UIKit
 
-/// Medición en realidad aumentada: la mira central toma puntos 3D con el LiDAR (cualquier superficie),
-/// dibuja líneas y distancias sobre la cámara y comparte las medidas con la PC.
+/// Medición en "Revisar 3D": se toca un punto de la nube, luego otro, y queda la distancia.
+/// Las medidas están en las mismas coordenadas del modelo, así que también aparecen en la PC.
 final class MeasureController: ObservableObject {
 
     struct Measure: Identifiable {
@@ -16,121 +16,58 @@ final class MeasureController: ObservableObject {
         var vertical: Float { abs(a.y - b.y) }
     }
 
-    @Published private(set) var active = false
     @Published private(set) var measures: [Measure] = []
     @Published private(set) var pending: SIMD3<Float>?
-    @Published private(set) var liveDistance: Float?
-    @Published private(set) var hasHit = false
+    @Published var active = false {
+        didSet { if !active { pending = nil; redraw() } }
+    }
+    /// Aviso corto cuando el toque no cae sobre puntos.
+    @Published var missed = false
 
     /// Se llama cada vez que cambia la lista (para enviarla a la PC).
     var onChange: (([Measure]) -> Void)?
 
+    /// Nodo con líneas y etiquetas; se agrega a la escena de la revisión 3D.
     let root = SCNNode()
-    private let cursor = SCNNode()
-    private let rubber = SCNNode()
-    private weak var view: ARSCNView?
-    private var current: SIMD3<Float>?
-    private var timer: Timer?
+    /// Tamaño de marcas y etiquetas según el tamaño del escaneo.
+    var markScale: Float = 1 { didSet { redraw() } }
+
     private var counter = 0
-
     private let measureColor = UIColor(red: 0.96, green: 0.66, blue: 0.13, alpha: 1)
-
-    func attach(_ v: ARSCNView) {
-        view = v
-        v.scene.rootNode.addChildNode(root)
-        let ring = SCNTorus(ringRadius: 0.012, pipeRadius: 0.0015)
-        ring.firstMaterial = Self.overlayMaterial(.white)
-        let ringNode = SCNNode(geometry: ring)
-        cursor.addChildNode(ringNode)
-        cursor.isHidden = true
-        v.scene.rootNode.addChildNode(cursor)
-        v.scene.rootNode.addChildNode(rubber)
-    }
-
-    func toggle() { setActive(!active) }
-
-    func setActive(_ on: Bool) {
-        active = on
-        pending = nil
-        liveDistance = nil
-        timer?.invalidate()
-        timer = nil
-        if on {
-            timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in self?.tick() }
-        } else {
-            cursor.isHidden = true
-            rubber.geometry = nil
-            rubber.childNodes.forEach { $0.removeFromParentNode() }
-        }
-    }
 
     // MARK: Puntos
 
-    func addPoint() {
-        guard let c = current else { return }
-        if let p = pending {
+    func tap(_ p: SIMD3<Float>) {
+        missed = false
+        if let a = pending {
             counter += 1
             measures.append(Measure(id: "ip\(Int(Date().timeIntervalSince1970 * 1000))", name: "iPhone \(counter)",
-                                    a: p, b: c))
+                                    a: a, b: p))
             pending = nil
-            liveDistance = nil
-            redraw()
             onChange?(measures)
         } else {
-            pending = c
+            pending = p
         }
+        redraw()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
     }
 
     func undo() {
         if pending != nil {
             pending = nil
-            liveDistance = nil
         } else if !measures.isEmpty {
             measures.removeLast()
-            redraw()
             onChange?(measures)
         }
+        redraw()
     }
 
     func clear() {
+        let had = !measures.isEmpty
         measures.removeAll()
         pending = nil
-        liveDistance = nil
         redraw()
-        onChange?(measures)
-    }
-
-    // MARK: Mira (15 veces por segundo)
-
-    private func tick() {
-        guard let v = view else { return }
-        let center = CGPoint(x: v.bounds.midX, y: v.bounds.midY)
-        var hit: SIMD3<Float>?
-        var normal = SIMD3<Float>(0, 1, 0)
-        if let q = v.raycastQuery(from: center, allowing: .estimatedPlane, alignment: .any),
-           let r = v.session.raycast(q).first {
-            let t = r.worldTransform
-            hit = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
-            normal = SIMD3<Float>(t.columns.1.x, t.columns.1.y, t.columns.1.z)
-        }
-        current = hit
-        hasHit = hit != nil
-        if let h = hit {
-            cursor.isHidden = false
-            cursor.simdPosition = h
-            cursor.simdOrientation = simd_quatf(from: SIMD3<Float>(0, 1, 0), to: simd_normalize(normal))
-        } else {
-            cursor.isHidden = true
-        }
-        if let p = pending, let h = hit {
-            liveDistance = simd_distance(p, h)
-            Self.makeSegment(rubber, a: p, b: h, color: UIColor.white.withAlphaComponent(0.85), label: nil)
-        } else {
-            liveDistance = nil
-            rubber.geometry = nil
-            rubber.childNodes.forEach { $0.removeFromParentNode() }
-        }
+        if had { onChange?(measures) }
     }
 
     // MARK: Dibujo
@@ -139,7 +76,15 @@ final class MeasureController: ObservableObject {
         root.childNodes.forEach { $0.removeFromParentNode() }
         for m in measures {
             let n = SCNNode()
-            Self.makeSegment(n, a: m.a, b: m.b, color: measureColor, label: Self.format(m.distance))
+            Self.makeSegment(n, a: m.a, b: m.b, color: measureColor, label: Self.format(m.distance), scale: markScale)
+            root.addChildNode(n)
+        }
+        if let p = pending {
+            let s = SCNSphere(radius: CGFloat(0.006 * markScale))
+            s.firstMaterial = Self.overlayMaterial(.white)
+            let n = SCNNode(geometry: s)
+            n.simdPosition = p
+            n.renderingOrder = 100
             root.addChildNode(n)
         }
     }
@@ -159,13 +104,14 @@ final class MeasureController: ObservableObject {
     }
 
     /// Línea (cilindro delgado) entre dos puntos, con esferas en los extremos y etiqueta opcional.
-    static func makeSegment(_ node: SCNNode, a: SIMD3<Float>, b: SIMD3<Float>, color: UIColor, label: String?) {
+    static func makeSegment(_ node: SCNNode, a: SIMD3<Float>, b: SIMD3<Float>, color: UIColor,
+                            label: String?, scale: Float = 1) {
         node.childNodes.forEach { $0.removeFromParentNode() }
         node.geometry = nil
         let d = b - a
         let len = simd_length(d)
         guard len > 0.0005 else { return }
-        let cyl = SCNCylinder(radius: 0.0012, height: CGFloat(len))
+        let cyl = SCNCylinder(radius: CGFloat(0.0015 * scale), height: CGFloat(len))
         cyl.firstMaterial = overlayMaterial(color)
         let line = SCNNode(geometry: cyl)
         line.simdPosition = (a + b) / 2
@@ -173,7 +119,7 @@ final class MeasureController: ObservableObject {
         line.renderingOrder = 100
         node.addChildNode(line)
         for p in [a, b] {
-            let s = SCNSphere(radius: 0.004)
+            let s = SCNSphere(radius: CGFloat(0.005 * scale))
             s.firstMaterial = overlayMaterial(color)
             let sn = SCNNode(geometry: s)
             sn.simdPosition = p
@@ -198,31 +144,62 @@ final class MeasureController: ObservableObject {
         let holder = SCNNode()
         holder.addChildNode(bgNode)
         holder.addChildNode(tn)
-        holder.scale = SCNVector3(0.0035, 0.0035, 0.0035)
-        holder.simdPosition = (a + b) / 2 + SIMD3<Float>(0, 0.025, 0)
+        let k = 0.0035 * scale
+        holder.scale = SCNVector3(k, k, k)
+        holder.simdPosition = (a + b) / 2 + SIMD3<Float>(0, 0.03 * scale, 0)
         holder.constraints = [SCNBillboardConstraint()]
         node.addChildNode(holder)
     }
 }
 
-// MARK: - Interfaz de medición
+// MARK: - Elegir el punto tocado
 
-struct MeasureToggle: View {
-    @ObservedObject var measure: MeasureController
+enum PointPicker {
+    /// Punto de la nube bajo el dedo: el más cercano a la cámara dentro de un radio en pantalla,
+    /// afinado con el promedio de los puntos vecinos (≤ 6 mm) para quitar ruido.
+    static func pick(at tap: CGPoint, in view: SCNView, points: [SIMD3<Float>]) -> SIMD3<Float>? {
+        guard !points.isEmpty, let pov = view.pointOfView, let cam = pov.camera else { return nil }
+        let size = view.bounds.size
+        guard size.width > 0, size.height > 0 else { return nil }
+        let inv = simd_inverse(pov.simdWorldTransform)
+        let fovRad = Float(cam.fieldOfView) * .pi / 180
+        let vertical = cam.projectionDirection == .vertical
+        let half = Float(vertical ? size.height : size.width) / 2
+        let f = half / tan(fovRad / 2)
+        let cx = Float(size.width) / 2, cy = Float(size.height) / 2
+        let tx = Float(tap.x), ty = Float(tap.y)
+        let zNear = Float(cam.zNear)
 
-    var body: some View {
-        Button {
-            measure.toggle()
-        } label: {
-            Image(systemName: "ruler")
-                .frame(width: 40, height: 40)
-                .background(measure.active ? AnyShapeStyle(Color(red: 0.96, green: 0.66, blue: 0.13))
-                                           : AnyShapeStyle(.ultraThinMaterial), in: Circle())
-                .foregroundStyle(measure.active ? Color.black : Color.white)
+        func search(radius: Float) -> (Int, Float)? {
+            let r2 = radius * radius
+            var best = -1
+            var bestDepth = Float.greatestFiniteMagnitude
+            for i in 0..<points.count {
+                let p = points[i]
+                let c = inv * SIMD4<Float>(p.x, p.y, p.z, 1)
+                let depth = -c.z
+                guard depth > zNear, depth < bestDepth else { continue }
+                let sx = cx + f * c.x / depth
+                let sy = cy - f * c.y / depth
+                let dx = sx - tx, dy = sy - ty
+                if dx * dx + dy * dy <= r2 { best = i; bestDepth = depth }
+            }
+            return best >= 0 ? (best, bestDepth) : nil
         }
-        .accessibilityLabel(measure.active ? "Salir de medir" : "Medir")
+        // con radio chico primero (precisión); si no hay puntos, un poco más amplio
+        guard let (idx, _) = search(radius: 10) ?? search(radius: 24) else { return nil }
+        let seed = points[idx]
+        var sum = SIMD3<Float>(repeating: 0)
+        var n: Float = 0
+        for p in points where simd_distance_squared(p, seed) <= 0.006 * 0.006 {
+            sum += p
+            n += 1
+        }
+        return n > 0 ? sum / n : seed
     }
 }
+
+// MARK: - Interfaz de medición (dentro de Revisar 3D)
 
 struct MeasurePanel: View {
     @ObservedObject var measure: MeasureController
@@ -231,7 +208,7 @@ struct MeasurePanel: View {
         VStack(spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.caption).foregroundStyle(.secondary)
+                    Text(title).font(.caption).foregroundStyle(measure.missed ? Color.orange : Color.secondary)
                     Text(readout)
                         .font(.system(size: 30, weight: .bold, design: .monospaced))
                         .contentTransition(.numericText())
@@ -250,21 +227,11 @@ struct MeasurePanel: View {
             HStack(spacing: 18) {
                 smallButton("arrow.uturn.backward", "Deshacer") { measure.undo() }
                     .disabled(measure.pending == nil && measure.measures.isEmpty)
-                Button {
-                    measure.addPoint()
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 30, weight: .bold))
-                        .frame(width: 72, height: 72)
-                        .background(Color(red: 0.96, green: 0.66, blue: 0.13), in: Circle())
-                        .foregroundStyle(.black)
-                }
-                .disabled(!measure.hasHit)
-                .accessibilityLabel(measure.pending == nil ? "Primer punto" : "Segundo punto")
                 smallButton("trash", "Borrar") { measure.clear() }
                     .disabled(measure.measures.isEmpty)
+                Spacer()
+                smallButton("checkmark", "Listo") { measure.active = false }
             }
-            .frame(maxWidth: .infinity)
 
             if !measure.measures.isEmpty {
                 ScrollView {
@@ -280,7 +247,7 @@ struct MeasurePanel: View {
                 }
                 .frame(maxHeight: 70)
             }
-            Text("Apunta la mira al punto y toca +. Lo que midas aparece también en la PC.")
+            Text("Gira con un dedo y acerca con dos; toca para poner cada punto. Lo que midas aparece también en la PC.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -290,13 +257,12 @@ struct MeasurePanel: View {
     }
 
     private var title: String {
-        if !measure.hasHit { return "Apunta a una superficie" }
-        return measure.pending == nil ? "Primer punto" : "Distancia"
+        if measure.missed { return "Ahí no hay puntos: toca sobre la nube" }
+        return measure.pending == nil ? "Toca el primer punto" : "Toca el segundo punto"
     }
 
     private var readout: String {
-        if let d = measure.liveDistance { return MeasureController.format(d) }
-        if let last = measure.measures.last { return MeasureController.format(last.distance) }
+        if let last = measure.measures.last, measure.pending == nil { return MeasureController.format(last.distance) }
         return "—"
     }
 
@@ -305,24 +271,10 @@ struct MeasurePanel: View {
             VStack(spacing: 4) {
                 Image(systemName: icon)
                     .font(.title3)
-                    .frame(width: 52, height: 52)
+                    .frame(width: 48, height: 48)
                     .background(Color.white.opacity(0.12), in: Circle())
                 Text(label).font(.caption2)
             }
-        }
-    }
-}
-
-/// Elige entre el panel de escaneo y el de medición según el modo.
-struct BottomArea<ScanBar: View>: View {
-    @ObservedObject var measure: MeasureController
-    let scanBar: ScanBar
-
-    var body: some View {
-        if measure.active {
-            MeasurePanel(measure: measure)
-        } else {
-            scanBar
         }
     }
 }
