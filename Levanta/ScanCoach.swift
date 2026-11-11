@@ -16,7 +16,7 @@ struct FrameStats {
 
 /// Indicación para el usuario mientras escanea.
 struct ScanGuide: Equatable {
-    enum Kind { case closer, farther, ok, ready }
+    enum Kind { case closer, farther, ok, ready, gap }
     var kind: Kind
     var text: String
     var spoken: String = ""
@@ -47,6 +47,8 @@ final class ScanCoach {
     private var spaceReady = false
     private var lastGuideTime: TimeInterval = 0
 
+    /// Aviso de un piso o pared que falta por leer (lo pone el motor; se usa cuando no hay nada más urgente).
+    var gapHint: (text: String, spoken: String)?
     var onGuide: ((ScanGuide?, [String: Int]) -> Void)?
 
     func reset() {
@@ -155,6 +157,9 @@ final class ScanCoach {
                               ? "Esta vista \(pct) % · muévete despacio · toca una pieza para más detalle"
                               : "Esta vista \(pct) % · buena distancia, muévete despacio")
             }
+        }
+        if (g == nil || g?.kind == .ok), let gh = gapHint {
+            g = ScanGuide(kind: .gap, text: gh.text, spoken: gh.spoken)
         }
         DispatchQueue.main.async { self.onGuide?(g, prog) }
     }

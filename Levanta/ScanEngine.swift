@@ -162,6 +162,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var nearFocus = false
     private var lastStreamTime: TimeInterval = 0
     private var streamIndex = 0
+    private let gaps = GapFinder()
     private var sessionName = ""        // solo en el hilo principal
     private var tintLiveMesh = true
 
@@ -239,6 +240,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             }
         }
         config.worldAlignment = .gravity
+        config.planeDetection = [.horizontal, .vertical]       // para avisar qué piso o pared falta por leer
         // Fotos de 12 MP: si iOS ofrece un formato pensado para capturarlas y no cambia la resolución
         // del video normal (la profundidad y el seguimiento quedan igual), se usa.
         // Video 4K (3840×2160): fotos con el doble de detalle y sin sonido de obturador. Si este iPhone no entrega
@@ -255,6 +257,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             usingHiRes = true
             hiResFramesChecked = 0
         }
+        if reset { queue.async { self.gaps.reset() } }
         let options: ARSession.RunOptions = reset ? [.resetTracking, .removeExistingAnchors] : []
         view.session.run(config, options: options)
     }
@@ -341,7 +344,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         guide = nil
         zoneProgress = [:]
         voice.reset()
-        queue.async { self.coach.reset() }
+        queue.async { self.coach.reset(); self.gaps.reset() }
         queue.async { self.anchorPose = nil; self.stillReadings = 0; self.stillState = false }
         CameraTuning.apply(sharp: false)
         sessionName = ""
@@ -439,6 +442,23 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: ARSessionDelegate (se llama en `queue`)
 
+    func session(_ session: ARSession, didAdd anchors: [ARAnchor]) { gaps.add(anchors) }
+    func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) { gaps.add(anchors) }
+    func session(_ session: ARSession, didRemove anchors: [ARAnchor]) { gaps.remove(anchors) }
+
+    /// ¿Hay lectura del LiDAR en este punto? (capa fina de 5 mm o resumen de 2 cm)
+    private func voxelOccupied(_ p: SIMD3<Float>) -> Bool {
+        let half: Int64 = 1 << 20
+        let inv = 1 / activeVoxel
+        let k = ((Int64((p.x * inv).rounded(.down)) + half) << 42) |
+                ((Int64((p.y * inv).rounded(.down)) + half) << 21) | (Int64((p.z * inv).rounded(.down)) + half)
+        if keyToIndex[k] != nil { return true }
+        let ia = 1 / archiveVoxel
+        let ka = ((Int64((p.x * ia).rounded(.down)) + half) << 42) |
+                 ((Int64((p.y * ia).rounded(.down)) + half) << 21) | (Int64((p.z * ia).rounded(.down)) + half)
+        return archiveKey[ka] != nil
+    }
+
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         if usingHiRes { checkHiRes(frame) }
         if frame.timestamp - lastDistanceTime >= 0.25 {
@@ -477,6 +497,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let camT = frame.camera.transform
         let camP = SIMD3<Float>(camT.columns.3.x, camT.columns.3.y, camT.columns.3.z)
         nearFocus = zones.contains { $0.distance(to: camP) < 1.0 }
+        gaps.check(frame: frame, occupied: { self.voxelOccupied($0) })
+        coach.gapHint = gaps.current(frame.timestamp)
         // si no te mueves, la misma vista ya está leída: no se agregan más puntos ni se manda a la PC
         guard isNewView(frame.camera.transform) else {
             coach.guide(frame: frame, zones: zones, centerDepth: lastCenterDepth)

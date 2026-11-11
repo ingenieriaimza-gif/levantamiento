@@ -250,6 +250,7 @@ struct FocusBar: View {
                     case .closer: pill(g.text, icon: "arrow.up.forward.circle.fill", bg: AnyShapeStyle(amber.opacity(0.95)), fg: .black, big: true)
                     case .farther: pill(g.text, icon: "arrow.down.backward.circle.fill", bg: AnyShapeStyle(amber.opacity(0.95)), fg: .black, big: true)
                     case .ready: pill(g.text, icon: "checkmark.seal.fill", bg: AnyShapeStyle(green.opacity(0.95)), fg: .black, big: true)
+                    case .gap: pill(g.text, icon: "exclamationmark.triangle.fill", bg: AnyShapeStyle(amber.opacity(0.95)), fg: .black, big: true)
                     case .ok: pill(g.text, icon: "hand.thumbsup.fill", bg: AnyShapeStyle(.ultraThinMaterial), fg: .white)
                     }
                     voiceButton
