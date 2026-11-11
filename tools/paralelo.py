@@ -311,3 +311,59 @@ def tapar_huecos(mesh, max_aristas=120, max_perimetro=0.6, log=None):
     if log:
         log(f"  {tapados:,} huecos chicos tapados")
     return out
+
+
+def limpiar_orillas(mesh, anillos=2, min_triangles=1500, log=None):
+    """Quita el fleco de las orillas (`anillos` filas de triángulos en cada borde abierto) y los pedazos
+    sueltos chicos. En las orillas el LiDAR mezcla el objeto con lo de atrás: ahí salían los bordes
+    blancos/"confeti" alrededor de los objetos."""
+    V, F, C = _arrays(mesh)
+    if len(F) == 0:
+        return mesh
+    n0 = len(F)
+    for _ in range(anillos):
+        a = np.r_[F[:, 0], F[:, 1], F[:, 2]].astype(np.int64)
+        b = np.r_[F[:, 1], F[:, 2], F[:, 0]].astype(np.int64)
+        n = len(V)
+        orilla = ~np.isin(a * n + b, b * n + a)
+        borde = np.zeros(n, bool)
+        borde[a[orilla]] = True
+        borde[b[orilla]] = True
+        F = F[~borde[F].any(1)]
+        if len(F) == 0:
+            break
+    out = limpiar(_malla(V, F, C), min_triangles)
+    if log:
+        log(f"  orillas limpias: {n0 - len(out.triangles):,} triángulos de fleco y pedazos sueltos fuera")
+    return out
+
+
+def superficie_continua(mesh, profundidad=None, max_dist=0.05, quitar_densidad=0.04, log=None):
+    """Reconstrucción Poisson: una sola superficie continua y lisa que pasa por todos los puntos (como
+    las apps de escaneo comerciales). Cierra huecos chicos y deja orillas limpias. Después se recorta
+    todo lo que quedó lejos de lo medido (> max_dist) o con muy pocos puntos cerca (densidad baja),
+    para no inventar superficies."""
+    t0 = time.time()
+    m = o3d.geometry.TriangleMesh(mesh)
+    m.compute_vertex_normals()
+    pcd = o3d.geometry.PointCloud(m.vertices)
+    pcd.normals = m.vertex_normals
+    if m.has_vertex_colors():
+        pcd.colors = m.vertex_colors
+    pcd = pcd.voxel_down_sample(0.004)
+    if profundidad is None:
+        # celdas de ~6 mm sin importar el tamaño del espacio (más grande = más profundidad, hasta 11)
+        ext = float(np.max(pcd.get_max_bound() - pcd.get_min_bound()))
+        profundidad = int(np.clip(np.ceil(np.log2(max(ext, 0.1) / 0.006)), 8, 11))
+    p, dens = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+        pcd, depth=profundidad, n_threads=nucleos())
+    dens = np.asarray(dens)
+    sc = o3d.t.geometry.RaycastingScene()
+    sc.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(m))
+    d = sc.compute_distance(o3d.core.Tensor(np.asarray(p.vertices).astype(np.float32))).numpy()
+    malo = (d > max_dist) | (dens < np.quantile(dens, quitar_densidad))
+    p.remove_vertices_by_mask(malo)
+    out = limpiar(p, 1500)
+    if log:
+        log(f"  superficie continua: {len(out.triangles):,} triángulos ({time.time() - t0:.0f} s)")
+    return out

@@ -605,8 +605,17 @@ def main():
                 except Exception as e:      # noqa: BLE001 — si no alcanza la memoria, se usa la malla exacta
                     log(f"  (modelo completo omitido: {e})")
             avance("fotos", 0, "Preparando las fotos")
-            from paralelo import tapar_huecos
-            tex_mesh = tapar_huecos(tex_mesh, log=log)          # sin agujeros chicos en el modelo con fotos
+            from paralelo import tapar_huecos, limpiar_orillas, taubin_paralelo
+            # acabado del modelo con fotos (el que se ve en Navisworks): orillas sin fleco, sin pedazos
+            # sueltos, sin agujeros chicos y superficies más lisas (el LiDAR deja ondas de 1–2 mm)
+            modo = os.environ.get("LEVANTA_ACABADO", "poisson")       # superficie continua (como las apps comerciales)
+            if modo == "poisson":
+                from paralelo import superficie_continua
+                tex_mesh = superficie_continua(tex_mesh, log=log)
+            else:
+                tex_mesh = limpiar_orillas(tex_mesh, log=log)
+                tex_mesh = tapar_huecos(tex_mesh, log=log)
+                tex_mesh = taubin_paralelo(tex_mesh, 10, log=log)
             target_tex = args.triangulos_textura
             if n_detalle:
                 # el presupuesto de triángulos se reparte: las piezas conservan su detalle (hasta la mitad)

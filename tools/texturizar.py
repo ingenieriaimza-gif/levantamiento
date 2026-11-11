@@ -284,6 +284,7 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         img = cv2.imread(frames[k]["jpg"], cv2.IMREAD_COLOR)
         if harmonize:
             img = np.clip(img.astype(np.float32) * gains[k][::-1], 0, 255).astype(np.uint8)
+        H_, W_ = img.shape[:2]
         for c in order[bounds[k]:bounds[k + 1]]:
             crop = img[lo[c, 1]:hi[c, 1] + 1, lo[c, 0]:hi[c, 0] + 1]
             if ts != 1.0:
