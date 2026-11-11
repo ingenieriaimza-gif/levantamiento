@@ -27,6 +27,12 @@ final class KeyframeRecorder {
     let sharpnessRatio: Float = 0.8
     private var depthW = 0, depthH = 0, imgW = 0, imgH = 0
 
+    // Fotos por necesidad: se toma una foto cuando la vista trae superficie que ninguna foto anterior cubrió
+    // (celdas de 10 cm vistas desde ese lado), no por tiempo ni por cuánto te moviste.
+    private var photographed = Set<Int64>()
+    let noveltyNeeded: Float = 0.30        // fracción mínima de superficie nueva (0.15 cerca de una pieza enfocada)
+    let maxGap: TimeInterval = 6           // si te mueves y pasan 6 s sin foto, se toma una (no dejar huecos)
+
     private(set) var directory: URL?
     private(set) var count = 0
     var isActive: Bool { directory != nil }
@@ -64,6 +70,7 @@ final class KeyframeRecorder {
         lastTime = 0
         waitingSince = nil
         recentBestSharpness = 0
+        photographed.removeAll(keepingCapacity: false)
     }
 
     /// Termina la sesión y devuelve la carpeta (o nil si no había nada).
@@ -110,24 +117,75 @@ final class KeyframeRecorder {
 
     // MARK: Cuadros
 
+    /// Qué parte de la superficie de esta vista no ha sido fotografiada todavía.
+    /// Devuelve la fracción nueva y las celdas (10 cm + lado desde el que se ve) para marcarlas si se toma la foto.
+    private func novelty(frame: ARFrame, depth: ARDepthData) -> (fraction: Float, keys: [Int64]) {
+        let dMap = depth.depthMap
+        guard let cMap = depth.confidenceMap else { return (1, []) }
+        CVPixelBufferLockBaseAddress(dMap, .readOnly)
+        CVPixelBufferLockBaseAddress(cMap, .readOnly)
+        defer {
+            CVPixelBufferUnlockBaseAddress(dMap, .readOnly)
+            CVPixelBufferUnlockBaseAddress(cMap, .readOnly)
+        }
+        guard let dBase = CVPixelBufferGetBaseAddress(dMap), let cBase = CVPixelBufferGetBaseAddress(cMap) else { return (1, []) }
+        let w = CVPixelBufferGetWidth(dMap), h = CVPixelBufferGetHeight(dMap)
+        let dRow = CVPixelBufferGetBytesPerRow(dMap), cRow = CVPixelBufferGetBytesPerRow(cMap)
+        let K = frame.camera.intrinsics
+        let img = frame.camera.imageResolution
+        let sx = Float(w) / Float(img.width), sy = Float(h) / Float(img.height)
+        let fx = K[0][0] * sx, fy = K[1][1] * sy
+        let cx = (K[2][0] + 0.5) * sx - 0.5, cy = (K[2][1] + 0.5) * sy - 0.5
+        let T = frame.camera.transform
+        let cam = SIMD3<Float>(T.columns.3.x, T.columns.3.y, T.columns.3.z)
+        let half: Int64 = 1 << 19
+        var keys: [Int64] = []
+        keys.reserveCapacity(1024)
+        var fresh = 0
+        for v in Swift.stride(from: 4, to: h, by: 4) {
+            let dp = dBase.advanced(by: v * dRow).assumingMemoryBound(to: Float32.self)
+            let cp = cBase.advanced(by: v * cRow).assumingMemoryBound(to: UInt8.self)
+            for u in Swift.stride(from: 4, to: w, by: 4) {
+                let d = dp[u]
+                guard cp[u] >= 1, d.isFinite, d > 0.3, d < 1.8 else { continue }
+                let pw = T * SIMD4<Float>((Float(u) - cx) * d / fx, -(Float(v) - cy) * d / fy, -d, 1)
+                let p = SIMD3<Float>(pw.x, pw.y, pw.z)
+                let dir = cam - p
+                let ax = abs(dir.x), ay = abs(dir.y), az = abs(dir.z)
+                let b: Int64
+                if ax >= ay && ax >= az { b = dir.x > 0 ? 0 : 1 } else if ay >= az { b = dir.y > 0 ? 2 : 3 } else { b = dir.z > 0 ? 4 : 5 }
+                let ix = Int64((p.x * 10).rounded(.down)) + half
+                let iy = Int64((p.y * 10).rounded(.down)) + half
+                let iz = Int64((p.z * 10).rounded(.down)) + half
+                let key = (ix << 43) | (iy << 23) | (iz << 3) | b
+                keys.append(key)
+                if !photographed.contains(key) { fresh += 1 }
+            }
+        }
+        guard keys.count >= 60 else { return (0, keys) }      // casi sin lecturas: decide el reloj de seguridad
+        return (Float(fresh) / Float(keys.count), keys)
+    }
+
     /// Decide si este cuadro es clave (se movió o giró lo suficiente) y lo guarda.
     /// Se llama en la cola de escaneo. Devuelve true si se guardó.
     @discardableResult
     func consider(frame: ARFrame, depth: ARDepthData, mask: [Bool]? = nil, dense: Bool = false,
                   saveLocal: Bool = true) -> Bool {
         guard directory != nil else { return false }
-        // dense = cerca de una pieza enfocada: fotos cada 3 cm o 3° (en lugar de 7 cm o 6°)
-        let minT = dense ? Float(0.03) : minTranslation
-        let minR = dense ? Float(3 * Float.pi / 180) : minRotation
+        // dense = cerca de una pieza enfocada: se pide menos superficie nueva para tomar la foto
         guard frame.timestamp - lastTime >= (dense ? 0.15 : minInterval) else { return false }
         let T = frame.camera.transform
+        let nov = novelty(frame: frame, depth: depth)
         if let L = lastPose {
             let dp = simd_distance(SIMD3<Float>(T.columns.3.x, T.columns.3.y, T.columns.3.z),
                                    SIMD3<Float>(L.columns.3.x, L.columns.3.y, L.columns.3.z))
             let q = simd_quatf(L).inverse * simd_quatf(T)
             var ang = q.angle
             if ang > .pi { ang = 2 * .pi - ang }
-            if dp < minT && ang < minR { return false }
+            let moved = dp >= minTranslation || ang >= minRotation
+            let need = nov.fraction >= (dense ? noveltyNeeded / 2 : noveltyNeeded)
+                || (moved && frame.timestamp - lastTime >= maxGap)
+            if !need { return false }
         }
 
         // Ya toca foto: tomar esta solo si es nítida comparada con las recientes,
@@ -138,6 +196,7 @@ final class KeyframeRecorder {
         let waited = frame.timestamp - (waitingSince ?? frame.timestamp)
         if sharp < sharpnessRatio * recentBestSharpness && waited < sharpnessWindow { return false }
         waitingSince = nil
+        photographed.formUnion(nov.keys)        // desde ya esta superficie cuenta como fotografiada
 
         // Con la PC conectada el iPhone no guarda nada: todo se manda a la PC (no se llena ni se satura el teléfono)
         if !saveLocal {
