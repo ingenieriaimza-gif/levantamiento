@@ -244,6 +244,11 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         // Video 4K (3840×2160): fotos con el doble de detalle y sin sonido de obturador. Si este iPhone no entrega
         // profundidad con ese formato, o la profundidad no cubre lo mismo que la foto, se vuelve al formato normal.
         usingHiRes = false
+        if Self.highResPhotos,
+           let hr = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing,
+           hr.imageResolution.width <= 2000 {
+            config.videoFormat = hr
+        }
         if Self.hiResVideo, !UserDefaults.standard.bool(forKey: "hiResMalo"),
            let f4k = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
             config.videoFormat = f4k
@@ -563,9 +568,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: Fotos de 12 MP (4032×3024) para la textura
 
-    /// Apagado: iOS reproduce el sonido de obturador en cada foto de 12 MP y la app se cerró en una prueba.
-    static let highResPhotos = false
-    static let hiResVideo = true
+    /// Fotos de 12 MP (iOS reproduce el sonido de obturador en cada una; es normal).
+    static let highResPhotos = true
+    static let hiResVideo = false
     private var usingHiRes = false
     private var hiResFramesChecked = 0
 
@@ -604,7 +609,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     /// y la manda a la PC, que la usa para la textura. La profundidad y la fusión siguen con los cuadros normales.
     private func requestHighRes(session: ARSession, at time: TimeInterval) {
         guard Self.highResPhotos, link.isConnected, !hrDisabled,
-              time - hrLastTime >= 0.4, link.backlog <= 4 else { return }
+              time - hrLastTime >= 0.8, link.backlog <= 4 else { return }
         hrLock.lock()
         if hrBusy { hrLock.unlock(); return }
         hrBusy = true
@@ -621,6 +626,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 return
             }
             self.hrQueue.async {
+              autoreleasepool {
                 if let jpg = FrameCodec.jpeg(hrFrame, scale: 1.0, quality: 0.93) {
                     var h = FrameCodec.header(hrFrame, index: 0, scale: 1.0)
                     h["nj"] = jpg.count
@@ -628,6 +634,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                         self.link.send(msg, important: true)
                     }
                 }
+              }
                 self.hrLock.lock()
                 self.hrBusy = false
                 self.hrSent += 1
