@@ -561,6 +561,7 @@ def _harmonize_gains(frames, C, labels, second, K, max_pairs=400_000):
 EXPORTAR_OBJ = False
 # El GLB era para "Revisar 3D" en la PC; ya no se entrega (solo FBX para Navisworks y un USDZ ligero para el iPhone)
 HACER_GLB = os.environ.get("LEVANTA_GLB", "0") == "1"
+HACER_USDZ = os.environ.get("LEVANTA_USDZ", "0") == "1"      # "Revisar 3D" del iPhone ya solo usa la nube en vivo
 
 
 def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
@@ -625,7 +626,8 @@ def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
         scene.export(os.path.join(out_dir, "modelo_texturizado.glb"))
     t2 = time.time()
     try:
-        _export_usdz(usd_parts, obj_dir, os.path.join(out_dir, "modelo_texturizado.usdz"))
+        if HACER_USDZ:
+            _export_usdz(usd_parts, obj_dir, os.path.join(out_dir, "modelo_texturizado.usdz"))
     except ImportError:
         _log("  (sin usd-core: no se generó USDZ)")
     t3 = time.time()

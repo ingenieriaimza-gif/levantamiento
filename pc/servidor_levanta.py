@@ -500,8 +500,9 @@ class Server:
                 self.status["progreso"] = None
                 await self.send_status(f"No se pudo crear el modelo: {fallo} Detalle en resultado\\error.txt")
             else:
-                if self._dejar_solo_navisworks(out):
-                    self._borrar_capturas(sdir)
+                loop_ = asyncio.get_running_loop()
+                if await loop_.run_in_executor(None, self._dejar_solo_navisworks, out):
+                    await loop_.run_in_executor(None, self._borrar_capturas, sdir)
                 self.status["resultados"].append(sdir)
                 self.status["progreso"] = {"carpeta": os.path.basename(sdir), "fraccion": 1.0,
                                            "etapa": "Listo", "restante_s": 0,
@@ -514,25 +515,32 @@ class Server:
     @staticmethod
     def _dejar_solo_navisworks(out):
         """Ya con el FBX listo, borra lo demás del resultado (GLB, USDZ, reporte, poses...): solo queda la
-        carpeta obj con el FBX y sus texturas, y el USDZ ligero para Revisar 3D en el iPhone. Si el FBX no se creó, no se borra nada."""
+        carpeta obj con el FBX y sus texturas. Si el FBX no se creó, no se borra nada."""
         import shutil
         if not os.path.exists(os.path.join(out, "obj", "modelo_navisworks.fbx")):
             return False
+        import time as _t
         obj = os.path.join(out, "obj")
-        for fn in os.listdir(obj):
-            if not (fn == "modelo_navisworks.fbx" or (fn.startswith("textura_") and fn.endswith(".jpg"))):
+        # en Windows un archivo puede estar bloqueado unos segundos (antivirus, indexador): se reintenta
+        for _intento in range(10):
+            pendientes = 0
+            for fn in os.listdir(obj):
+                if not (fn == "modelo_navisworks.fbx" or (fn.startswith("textura_") and fn.endswith(".jpg"))):
+                    try:
+                        os.remove(os.path.join(obj, fn))
+                    except OSError:
+                        pendientes += 1
+            for fn in os.listdir(out):
+                if fn == "obj":
+                    continue
+                p = os.path.join(out, fn)
                 try:
-                    os.remove(os.path.join(obj, fn))
+                    shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
                 except OSError:
-                    pass
-        for fn in os.listdir(out):
-            if fn in ("obj", "modelo_texturizado.usdz"):      # el USDZ ligero es para "Revisar 3D" en el iPhone
-                continue
-            p = os.path.join(out, fn)
-            try:
-                shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
-            except OSError:
-                pass
+                    pendientes += 1
+            if not pendientes:
+                break
+            _t.sleep(1.5)
         return True
 
     @staticmethod
