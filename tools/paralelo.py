@@ -246,3 +246,68 @@ def taubin_paralelo(mesh, iteraciones=10, margen=0.15, log=None, min_paralelo=80
     if log:
         log(f"  suavizado en paralelo con {workers} núcleos ({time.time() - t0:.0f} s)")
     return out
+
+
+def tapar_huecos(mesh, max_aristas=120, max_perimetro=0.6, log=None):
+    """Tapa los huecos chicos de la malla (orillas cerradas de hasta `max_aristas` y `max_perimetro` m)
+    con un abanico desde su centro. Los huecos grandes (zonas sin escanear) se dejan como están."""
+    V, F, C = _arrays(mesh)
+    if len(F) == 0:
+        return mesh
+    # aristas dirigidas de cada triángulo; una arista es orilla si su par opuesto no existe
+    a = np.r_[F[:, 0], F[:, 1], F[:, 2]].astype(np.int64)
+    b = np.r_[F[:, 1], F[:, 2], F[:, 0]].astype(np.int64)
+    n = len(V)
+    key = a * n + b
+    rev = b * n + a
+    orilla = ~np.isin(key, rev)
+    ea, eb = a[orilla], b[orilla]
+    # vértices con más de una arista de orilla saliente: nudo, no se tocan
+    salidas = np.bincount(ea, minlength=n)
+    sig = {}
+    for x, y in zip(ea.tolist(), eb.tolist()):
+        if salidas[x] == 1:
+            sig[x] = y
+    visto = set()
+    nuevosV, nuevosC, nuevosF = [], [], []
+    tapados = 0
+    for inicio in list(sig.keys()):
+        if inicio in visto:
+            continue
+        lazo = [inicio]
+        x = inicio
+        ok = False
+        while len(lazo) <= max_aristas:
+            y = sig.get(x)
+            if y is None or (y in visto):
+                break
+            if y == inicio:
+                ok = True
+                break
+            lazo.append(y)
+            x = y
+        visto.update(lazo)
+        if not ok or len(lazo) < 3:
+            continue
+        P = V[lazo]
+        per = np.linalg.norm(P - np.roll(P, -1, 0), axis=1).sum()
+        if per > max_perimetro:
+            continue
+        idx = n + len(nuevosV)
+        nuevosV.append(P.mean(0))
+        if C is not None:
+            nuevosC.append(C[lazo].mean(0))
+        for i in range(len(lazo)):
+            u, w = lazo[i], lazo[(i + 1) % len(lazo)]
+            nuevosF.append((w, u, idx))          # orientación contraria a la orilla = misma cara que la malla
+        tapados += 1
+    if not tapados:
+        return mesh
+    V2 = np.vstack([V, np.array(nuevosV)])
+    F2 = np.vstack([F, np.array(nuevosF, dtype=F.dtype)])
+    C2 = None if C is None else np.vstack([C, np.array(nuevosC)])
+    out = _malla(V2, F2, C2)
+    out.compute_vertex_normals()
+    if log:
+        log(f"  {tapados:,} huecos chicos tapados")
+    return out

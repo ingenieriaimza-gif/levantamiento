@@ -31,9 +31,9 @@ final class KeyframeRecorder {
     private(set) var count = 0
     var isActive: Bool { directory != nil }
 
-    /// Escala de la foto guardada (1920×1440 × 0.75 = 1440×1080).
-    let imageScale: CGFloat = 0.75
-    let jpegQuality: CGFloat = 0.8
+    /// Foto guardada a resolución completa (1920×1440), igual que la que se manda a la PC.
+    let imageScale: CGFloat = 1.0
+    let jpegQuality: CGFloat = 0.85
     let minTranslation: Float = 0.07      // m
     let minRotation: Float = 6 * .pi / 180
     let minInterval: TimeInterval = 0.25

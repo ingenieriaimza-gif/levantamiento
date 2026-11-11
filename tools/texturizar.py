@@ -63,7 +63,7 @@ def _shelf_pack(sizes, page):
 
 
 def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
-                 page_size=4096, zbuf_scale=2, smooth_iters=6, to_z_up=None, scale=1.0,
+                 page_size=4096, zbuf_scale=2, smooth_iters=20, to_z_up=None, scale=1.0,
                  harmonize=True, texture_scale=1.0, consume=False):
     """
     mesh: TriangleMesh de Open3D en el mundo de ARKit (Y arriba, metros).
@@ -271,6 +271,7 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     per_page = cols_pp * cols_pp
     n_color_pages = int(math.ceil(len(none) / per_page)) if len(none) else 0
     pages = [np.full((page_size, page_size, 3), 128, np.uint8) for _ in range(n_pages + n_color_pages)]
+    llenos = [np.zeros((page_size, page_size), bool) for _ in range(n_pages)]      # píxeles con foto
     page_of = np.zeros(nF, np.int32)
     face_uv = np.zeros((nF, 3, 2))
 
@@ -289,6 +290,7 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
                 crop = cv2.resize(crop, (int(csize[c, 0]), int(csize[c, 1])), interpolation=cv2.INTER_AREA)
             pg, px, py = place[c]
             pages[pg][py:py + crop.shape[0], px:px + crop.shape[1]] = crop
+            llenos[pg][py:py + crop.shape[0], px:px + crop.shape[1]] = True
     if nC:
         lo_f, pl_f = lo[chart_of], place[chart_of]
         cu = (uvf[..., 0] - lo_f[:, None, 0] + 0.5) * ts + pl_f[:, None, 1]
@@ -309,6 +311,11 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         cuv = np.stack([(gx * CELL + CELL / 2) / page_size, 1.0 - (gy * CELL + CELL / 2) / page_size], -1)
         face_uv[none] = cuv[:, None, :]
         page_of[none] = pg
+    # los huecos entre parches toman el color de la orilla del parche vecino (no gris): al alejarse,
+    # Navisworks mezcla píxeles vecinos y el gris/negro se veía como costuras y manchas
+    for q in range(n_pages):
+        pages[q] = _rellenar_huecos(pages[q], llenos[q])
+    del llenos
     n_photo_pages = n_pages
     n_pages = len(pages)
     # recortar la última página de color a lo usado no hace falta: JPEG la comprime casi a nada
@@ -320,6 +327,26 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
          f"{n_color_pages} de color, {page_size}², {time.time() - t0:.0f} s")
     return {"triangles": nF, "photos_used": int(len(used)), "pages": n_pages,
             "coverage": float((labels >= 0).mean())}
+
+
+def _rellenar_huecos(img, mask):
+    """Rellena los píxeles sin foto con los colores de alrededor (empuje y jalón por pirámide)."""
+    if mask.all() or not mask.any():
+        return img
+    niveles = []
+    c = img.astype(np.float32) * mask[..., None]
+    w = mask.astype(np.float32)
+    while min(c.shape[:2]) > 8:
+        niveles.append((c, w))
+        c = cv2.resize(c, (c.shape[1] // 2, c.shape[0] // 2), interpolation=cv2.INTER_AREA)
+        w = cv2.resize(w, (w.shape[1] // 2, w.shape[0] // 2), interpolation=cv2.INTER_AREA)
+    rell = c / np.maximum(w, 1e-6)[..., None]
+    for c, w in reversed(niveles):
+        up = cv2.resize(rell, (c.shape[1], c.shape[0]), interpolation=cv2.INTER_LINEAR)
+        rell = np.where(w[..., None] > 1e-6, c / np.maximum(w, 1e-6)[..., None], up)
+    out = img.copy()
+    out[~mask] = np.clip(rell[~mask], 0, 255).astype(np.uint8)
+    return out
 
 
 def _project(fr, P):
@@ -456,12 +483,10 @@ def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
             f.write("\n".join(mtl_lines) + "\n")
     del obj_lines
     t4 = time.time()
-    # mismos datos para Navisworks (FBX con texturas) y SolidWorks (3MF con texturas)
-    from formatos_cad import write_3mf, write_fbx
+    # Navisworks (FBX con texturas); el 3MF de SolidWorks ya no se usa
+    from formatos_cad import write_fbx
     _avance(0.9, "Guardando el modelo con fotos para Navisworks (FBX)")
     write_fbx(os.path.join(obj_dir, "modelo_navisworks.fbx"), cad_parts)
-    _avance(0.95, "Guardando el modelo con fotos para SolidWorks (3MF)")
-    write_3mf(os.path.join(out_dir, "modelo_solidworks.3mf"), cad_parts, obj_dir)
     t5 = time.time()
     _log(f"  guardado: GLB {t2 - t1:.0f} s · USDZ {t3 - t2:.0f} s · OBJ {t4 - t3:.0f} s · FBX+3MF {t5 - t4:.0f} s")
 

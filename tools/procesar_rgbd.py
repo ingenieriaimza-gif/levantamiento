@@ -605,6 +605,8 @@ def main():
                 except Exception as e:      # noqa: BLE001 — si no alcanza la memoria, se usa la malla exacta
                     log(f"  (modelo completo omitido: {e})")
             avance("fotos", 0, "Preparando las fotos")
+            from paralelo import tapar_huecos
+            tex_mesh = tapar_huecos(tex_mesh, log=log)          # sin agujeros chicos en el modelo con fotos
             target_tex = args.triangulos_textura
             if n_detalle:
                 # el presupuesto de triángulos se reparte: las piezas conservan su detalle (hasta la mitad)
@@ -639,7 +641,7 @@ def main():
         out = lambda n: os.path.join(args.salida, n)
         lo, hi = np.asarray(mesh.vertices).min(0), np.asarray(mesh.vertices).max(0)
         if not todos:
-            # solo los dos archivos que se usan: FBX (Navisworks) y 3MF (SolidWorks), ya guardados
+            # solo el archivo que se usa: FBX con fotos para Navisworks (ya guardado)
             rep = [
                 "Levantamiento 3D",
                 f"Cuadros: {len(frames)} recibidos, {used} usados, {dropped} borrosos descartados",
@@ -648,7 +650,6 @@ def main():
                 *([f"Piezas enfocadas: {len(zonas)}; reconstruidas a 2 mm ({n_detalle:,} triángulos de detalle)."]
                   if zonas else []),
                 "Navisworks -> obj/modelo_navisworks.fbx (junto a sus textura_*.jpg), en milímetros, Z arriba.",
-                "SolidWorks 2021+ -> modelo_solidworks.3mf (textura dentro), en milímetros, Z arriba.",
             ]
             if tex_info:
                 rep.append(f"Modelo con fotos: {tex_info['triangles']:,} triángulos, {tex_info['photos_used']} fotos, "

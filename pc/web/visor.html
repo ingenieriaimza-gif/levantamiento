@@ -688,7 +688,7 @@ async function loadScans() {
         actions.append(det);
       } else if (!s.con_modelo) {
         pills.append(el('span', { className: 'pill warn', textContent: s.procesado ? 'el modelo no se terminó' : 'falta crear el modelo' }));
-        body.append(el('div', { className: 'muted', textContent: 'Aquí solo están las fotos y medidas del iPhone. "Crear modelo 3D" las convierte en los archivos para Navisworks y SolidWorks (tarda unos minutos y verás el avance).' }));
+        body.append(el('div', { className: 'muted', textContent: 'Aquí solo están las fotos y medidas del iPhone. "Crear modelo 3D" las convierte en el modelo con fotos para Navisworks (tarda unos minutos y verás el avance).' }));
         actions.append(crear('Crear modelo 3D'));
       } else {
         pills.append(el('span', { className: 'pill ok', textContent: 'modelo listo' }));
@@ -711,8 +711,6 @@ async function loadScans() {
         // solo los dos archivos que se usan
         grupo('Navisworks (interferencias)',
           fileRow('Modelo con fotos (FBX)', 'con colores y texturas; sirve en Clash Detective; en milímetros. Déjalo junto a sus imágenes textura_*.jpg', 'obj/modelo_navisworks.fbx', 'modelo_navisworks.fbx'));
-        grupo('SolidWorks',
-          fileRow('Modelo con fotos (3MF)', 'con colores y texturas (SolidWorks 2021 o más nuevo): Abrir como cuerpo de gráficos; en milímetros', 'modelo_solidworks.3mf'));
         if (has('modelo_texturizado.glb')) {
           const v3 = el('button', { className: 'btn primary', type: 'button', textContent: 'Revisar 3D y medir' });
           v3.onclick = () => openScan(s.carpeta, s.nombre);
