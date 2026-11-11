@@ -64,6 +64,8 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     private var connectedFlag = false
     private var inflight = 0
     private var retryWork: DispatchWorkItem?
+    private var probes: [NWConnection] = []
+    private var probeWork: DispatchWorkItem?
 
     var isConnected: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -95,6 +97,7 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
 
     private func disconnect(state newState: State) {
         retryWork?.cancel()
+        cancelProbes()
         browser?.cancel(); browser = nil
         resolver?.cancel(); resolver = nil
         task?.cancel(with: .goingAway, reason: nil); task = nil
@@ -129,6 +132,51 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
         }
         browser = b
         b.start(queue: .main)
+        // Si en 4 s no aparece por Bonjour (otra red, o la red bloquea el descubrimiento), se prueban las
+        // direcciones de los puntos de acceso: la PC con zona Wi‑Fi (192.168.137.1) o la PC conectada a la
+        // zona personal del iPhone (172.20.10.x). Así sirve la red local de cualquiera de los dos.
+        probeWork?.cancel()
+        let w = DispatchWorkItem { [weak self] in self?.probeHotspots() }
+        probeWork = w
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: w)
+    }
+
+    private func cancelProbes() {
+        probeWork?.cancel(); probeWork = nil
+        probes.forEach { $0.cancel() }
+        probes.removeAll()
+    }
+
+    private func probeHotspots() {
+        guard enabled, task == nil, resolver == nil, browser != nil else { return }
+        var hosts = ["192.168.137.1"]
+        hosts += (2...14).map { "172.20.10.\($0)" }
+        var found = false
+        for h in hosts {
+            let c = NWConnection(host: NWEndpoint.Host(h), port: 8765, using: .tcp)
+            c.stateUpdateHandler = { [weak self, weak c] st in
+                guard let self, let c else { return }
+                if case .ready = st, !found, self.task == nil {
+                    found = true
+                    self.cancelProbes()
+                    self.browser?.cancel(); self.browser = nil
+                    self.open(address: "\(h):8765")
+                }
+                if case .failed = st { c.cancel() }
+            }
+            probes.append(c)
+            c.start(queue: .main)
+        }
+        // si ninguna respondió, se cancelan y se vuelve a intentar con el ciclo normal
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self, !found else { return }
+            self.probes.forEach { $0.cancel() }
+            self.probes.removeAll()
+            // seguir buscando mientras no haya conexión
+            let w = DispatchWorkItem { [weak self] in self?.probeHotspots() }
+            self.probeWork = w
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: w)
+        }
     }
 
     /// Conecta un momento al servicio para conocer su IP y puerto reales.
@@ -163,6 +211,7 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     // MARK: WebSocket
 
     private func open(address: String) {
+        cancelProbes()
         var addr = address
         if !addr.contains(":") { addr += ":8765" }
         guard let url = URL(string: "ws://\(addr)/ws") else {

@@ -109,6 +109,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var lastCamPos = SIMD3<Float>(0, 0, 0)
 
     let pointsNode = SCNNode()
+    let occluder = Occluder()
     private(set) var sceneView: ARSCNView?
 
     // MARK: Estado interno (solo se toca dentro de `queue`)
@@ -193,6 +194,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let view = ARSCNView(frame: .zero)
         view.automaticallyUpdatesLighting = false
         view.rendersCameraGrain = false
+        view.scene.rootNode.addChildNode(occluder.node)
         view.scene.rootNode.addChildNode(pointsNode)
         liveMeshNode.renderingOrder = -1
         view.scene.rootNode.addChildNode(liveMeshNode)
@@ -339,6 +341,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         focus.clear()
         pointCount = 0
         pointsNode.geometry = nil
+        occluder.clear()
         liveMeshNode.geometry = nil
         lastLiveMesh = nil
         lastLiveMeshTime = nil
@@ -472,6 +475,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             DispatchQueue.main.async { self.centerDistance = d }
         }
         guard scanning, tracking, !reviewing else { return }
+        if showCloud { occluder.update(frame: frame) }
         if lostWhileScanning {
             // después de perder la ubicación solo se sigue si lo que ve el LiDAR coincide con lo ya
             // escaneado; si no, la posición quedó corrida y se duplicarían superficies
