@@ -1,7 +1,6 @@
 import ARKit
 import SceneKit
 import Combine
-import os
 
 /// Motor de escaneo: lee la profundidad del LiDAR en cada cuadro, la convierte
 /// en puntos 3D del mundo con color y la acumula en una rejilla de vóxeles
@@ -104,7 +103,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var fineCounts: [UInt16] = []
     /// Puntos de 2 mm: todo lo que se lee de cerca (≤ 1 m), no solo las piezas enfocadas. Es la definición
     /// real máxima del LiDAR (a 30–60 cm cada lectura cubre 1.5–2.5 mm; 1 mm sería solo ruido).
-    private let maxFineVoxels = 6_000_000
+    private let maxFineVoxels = 8_000_000
     private let fineRange: Float = 1.0          // lecturas a menos de esto también van a la capa de 2 mm
     private let fineDrawRadius: Float = 1.6     // alrededor de ti se dibuja la capa de 2 mm
     private var lastCamPos = SIMD3<Float>(0, 0, 0)
@@ -179,7 +178,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var archCounts: [UInt32] = []
     private var archQuality: [UInt8] = []     // 0 mala · 1 regular · 2 buena · 3 excelente
     private var archivedPoints = 0            // puntos de 5 mm que se resumieron (para el contador)
-    private let maxArchive = 12_000_000
+    private let maxArchive = 25_000_000
     private let processInterval: TimeInterval = 0.09   // ~11 cuadros por segundo
     private let pixelStep = 1                           // todos los píxeles del mapa de profundidad
 
@@ -213,12 +212,6 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         view.session.delegate = self
         view.session.delegateQueue = queue
         sceneView = view
-        if UserDefaults.standard.bool(forKey: "escaneando") {
-            // la vez anterior la app se cerró escaneando: sin fotos de 12 MP, que son lo que más memoria pide
-            UserDefaults.standard.set(false, forKey: "escaneando")
-            UserDefaults.standard.set(true, forKey: "hrApagado")
-            statusMessage = "La app se cerró en el escaneo anterior: apagué las fotos de 12 MP para que sea más estable."
-        }
         startSession(reset: true)
         startPreviewTimer()
         link.setEnabled(true)          // siempre busca la PC
@@ -274,7 +267,6 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     func toggleScanning() {
         let start = !isScanning
         isScanning = start
-        UserDefaults.standard.set(start, forKey: "escaneando")       // si la app se cierra a media sesión, queda marcado
         if !start { guide = nil }
         if start && sharpCapture { CameraTuning.apply(sharp: true) }
         if start && link.isConnected { link.sendStart(name: currentSessionName()) }
@@ -335,7 +327,6 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     }
 
     func reset() {
-        UserDefaults.standard.set(false, forKey: "escaneando")
         if link.isConnected, let d = FrameCodec.pack(kind: 4, header: [:]) {
             link.send(d, important: true)            // la PC descarta lo recibido de este escaneo
         }
@@ -455,31 +446,6 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) { gaps.add(anchors) }
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) { gaps.remove(anchors) }
 
-    // MARK: Memoria del iPhone
-
-    /// 0 normal · 1 poca memoria (se apagan las fotos de 12 MP) · 2 casi sin memoria (se deja de acumular la vista
-    /// en pantalla, pero la PC sigue recibiendo todo y el escaneo no se pierde).
-    private var memoryLevel = 0
-    private var lastMemCheck: TimeInterval = 0
-    private var memWarned = 0
-
-    private func updateMemory(_ t: TimeInterval) {
-        guard t - lastMemCheck >= 1 else { return }
-        lastMemCheck = t
-        let free = Int(os_proc_available_memory())
-        let level = free < 450_000_000 ? 2 : (free < 1_100_000_000 ? 1 : 0)
-        if level != memoryLevel {
-            memoryLevel = level
-            if level > memWarned {
-                memWarned = level
-                let msg = level == 2
-                    ? "Memoria del iPhone casi llena: la vista de puntos ya no se actualiza, pero la PC sigue recibiendo todo. Termina este escaneo y empieza otro."
-                    : "Memoria del iPhone baja: apagué las fotos de 12 MP para que no se cierre la app."
-                DispatchQueue.main.async { self.statusMessage = msg }
-            }
-        }
-    }
-
     /// ¿Hay lectura del LiDAR en este punto? (capa fina de 5 mm o resumen de 2 cm)
     private func voxelOccupied(_ p: SIMD3<Float>) -> Bool {
         let half: Int64 = 1 << 20
@@ -531,15 +497,14 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let camT = frame.camera.transform
         let camP = SIMD3<Float>(camT.columns.3.x, camT.columns.3.y, camT.columns.3.z)
         nearFocus = zones.contains { $0.distance(to: camP) < 1.0 }
-        updateMemory(frame.timestamp)
-        if memoryLevel == 0 { gaps.check(frame: frame, occupied: { self.voxelOccupied($0) }) }
+        gaps.check(frame: frame, occupied: { self.voxelOccupied($0) })
         coach.gapHint = gaps.current(frame.timestamp)
         // si no te mueves, la misma vista ya está leída: no se agregan más puntos ni se manda a la PC
         guard isNewView(frame.camera.transform) else {
             coach.guide(frame: frame, zones: zones, centerDepth: lastCenterDepth)
             return
         }
-        let stats = memoryLevel >= 2 ? FrameStats() : integrate(frame, mask: mask)
+        let stats = integrate(frame, mask: mask)
         coach.ingest(stats, frame: frame, zones: zones)
         coach.guide(frame: frame, zones: zones, centerDepth: lastCenterDepth)
         var savedKeyframe = false
@@ -666,9 +631,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     /// En cada foto clave pide a iOS una foto de máxima resolución (con su propia posición e intrínsecos)
     /// y la manda a la PC, que la usa para la textura. La profundidad y la fusión siguen con los cuadros normales.
     private func requestHighRes(session: ARSession, at time: TimeInterval) {
-        guard Self.highResPhotos, link.isConnected, !hrDisabled, memoryLevel == 0,
-              !UserDefaults.standard.bool(forKey: "hrApagado"),
-              time - hrLastTime >= 1.5, link.backlog <= 4 else { return }
+        guard Self.highResPhotos, link.isConnected, !hrDisabled,
+              time - hrLastTime >= 0.8, link.backlog <= 4 else { return }
         hrLock.lock()
         if hrBusy { hrLock.unlock(); return }
         hrBusy = true
