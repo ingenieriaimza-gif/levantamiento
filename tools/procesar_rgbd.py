@@ -531,7 +531,7 @@ def main():
         del vbg                                   # liberar el volumen antes de texturizar
         import gc
         gc.collect()
-        rondas = int(os.environ.get("LEVANTA_RONDAS_ALINEAR", "2"))
+        rondas = int(os.environ.get("LEVANTA_RONDAS_ALINEAR", "3"))       # 3 vueltas de alineación
         for ronda in range(rondas if not args.sin_alinear and len(frames) >= 20 else 0):
             if not len(mesh.triangles):
                 break

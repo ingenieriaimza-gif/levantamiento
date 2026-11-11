@@ -275,6 +275,14 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     page_of = np.zeros(nF, np.int32)
     face_uv = np.zeros((nF, 3, 2))
 
+    # --- nivelado de costuras: corrección suave de color para que no se noten las uniones entre fotos
+    nivel = None
+    if harmonize and nC:
+        _avance(0.64, "Igualando el color entre fotos")
+        nivel = _nivelar_costuras(frames, F, labels, lab_faces, corner_uv, gains, K)
+    f_ord = np.argsort(chart_of, kind="stable")
+    f_ini = np.searchsorted(chart_of[f_ord], np.arange(nC + 1)) if nC else np.zeros(1, int)
+
     _avance(0.66, "Armando la textura con las fotos")
     order = np.argsort(chart_label, kind="stable")
     bounds = np.searchsorted(chart_label[order], np.arange(K + 1))
@@ -287,6 +295,8 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         H_, W_ = img.shape[:2]
         for c in order[bounds[k]:bounds[k + 1]]:
             crop = img[lo[c, 1]:hi[c, 1] + 1, lo[c, 0]:hi[c, 0] + 1]
+            if nivel is not None:
+                crop = _aplicar_nivel(crop, nivel, f_ord[f_ini[c]:f_ini[c + 1]], uvf, lo[c])
             if ts != 1.0:
                 crop = cv2.resize(crop, (int(csize[c, 0]), int(csize[c, 1])), interpolation=cv2.INTER_AREA)
             pg, px, py = place[c]
@@ -355,6 +365,90 @@ def _project(fr, P):
     Pc = (P - Tc[:3, 3]) @ Tc[:3, :3]
     z = np.maximum(Pc[:, 2], 1e-6)
     return fr["fx"] * Pc[:, 0] / z + fr["cx"], fr["fy"] * Pc[:, 1] / z + fr["cy"]
+
+
+def _nivelar_costuras(frames, F, labels, lab_faces, corner_uv, gains, K, lam=0.15, max_dif=70.0):
+    """
+    Nivelado global de costuras (como en el software de fotogrametría): para cada vértice y la foto que
+    lo pinta se calcula una corrección de color (suma, por canal) tal que
+      · en los vértices donde se juntan dos fotos, los dos colores corregidos coincidan, y
+      · dentro de una misma foto la corrección cambie poco a poco (no se nota).
+    Devuelve (corrección por esquina de cada cara con foto [n,3,3] en BGR).
+    """
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.linalg import lsqr
+    Fl = F[lab_faces]                                   # [n,3]
+    kk = np.repeat(labels[lab_faces], 3)
+    vv = Fl.reshape(-1)
+    key = vv.astype(np.int64) * K + kk
+    uniq, first, inv = np.unique(key, return_index=True, return_inverse=True)
+    nP = len(uniq)
+    pv, pk = uniq // K, (uniq % K).astype(np.int64)
+    puv = corner_uv[lab_faces].reshape(-1, 2)[first]
+    # color de cada (vértice, foto)
+    col = np.zeros((nP, 3), np.float32)
+    orden = np.argsort(pk, kind="stable")
+    lim = np.searchsorted(pk[orden], np.arange(K + 1))
+    for k in range(K):
+        sel = orden[lim[k]:lim[k + 1]]
+        if len(sel) == 0:
+            continue
+        img = cv2.imread(frames[k]["jpg"], cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        img = cv2.blur(img, (5, 5)).astype(np.float32) * gains[k][::-1].astype(np.float32)
+        h, w = img.shape[:2]
+        x = np.clip(np.round(puv[sel, 0]).astype(int), 0, w - 1)
+        y = np.clip(np.round(puv[sel, 1]).astype(int), 0, h - 1)
+        col[sel] = img[y, x]
+    # costuras: pares consecutivos del mismo vértice (uniq está ordenado por vértice)
+    mismo = np.nonzero(pv[1:] == pv[:-1])[0]
+    a, b = mismo, mismo + 1
+    dif = col[b] - col[a]
+    ok = (np.abs(dif).max(1) < max_dif) & (col[a].min(1) > 8) & (col[b].min(1) > 8) \
+        & (col[a].max(1) < 250) & (col[b].max(1) < 250)       # diferencias enormes = otra cosa, no exposición
+    a, b, dif = a[ok], b[ok], dif[ok]
+    if len(a) < 100:
+        return None
+    # suavidad dentro de la misma foto: aristas de cada cara
+    pc = inv.reshape(-1, 3)
+    ea = np.r_[pc[:, 0], pc[:, 1], pc[:, 2]]
+    eb = np.r_[pc[:, 1], pc[:, 2], pc[:, 0]]
+    nS, nE = len(a), len(ea)
+    mu = 0.01
+    rows = np.r_[np.arange(nS), np.arange(nS), nS + np.arange(nE), nS + np.arange(nE), nS + nE + np.arange(nP)]
+    cols = np.r_[a, b, ea, eb, np.arange(nP)]
+    vals = np.r_[np.ones(nS), -np.ones(nS), np.full(nE, lam), np.full(nE, -lam), np.full(nP, mu)]
+    A = coo_matrix((vals, (rows, cols)), shape=(nS + nE + nP, nP)).tocsr()
+    g = np.zeros((nP, 3), np.float32)
+    for ch in range(3):
+        rhs = np.r_[dif[:, ch], np.zeros(nE + nP)]
+        g[:, ch] = lsqr(A, rhs, atol=1e-4, btol=1e-4, iter_lim=250)[0]
+    g = np.clip(g, -60, 60)
+    antes = np.abs(dif).mean()
+    despues = np.abs(dif - (g[a] - g[b])).mean()
+    _log(f"  nivelado de costuras: {nS:,} uniones; diferencia media de color {antes:.1f} -> {despues:.1f} (de 255)")
+    return g[inv].reshape(-1, 3, 3)
+
+
+def _aplicar_nivel(crop, nivel, caras, uvf, lo_c):
+    """Suma al recorte de foto de un parche su corrección de color (interpolada por triángulo y suavizada)."""
+    off = nivel[caras]                                 # [m,3 esquinas,3 canales]
+    medio = off.reshape(-1, 3).mean(0)
+    if np.abs(off).max() < 1.5:
+        return crop
+    h, w = crop.shape[:2]
+    if h * w < 80 or len(caras) < 3:
+        campo = np.broadcast_to(medio, (h, w, 3))
+    else:
+        campo = np.empty((h, w, 3), np.float32)
+        campo[:] = medio
+        tri = np.round(uvf[caras] - lo_c).astype(np.int32)      # [m,3,2] en píxeles del recorte
+        tm = off.mean(1)
+        for t, c in zip(tri, tm):
+            cv2.fillConvexPoly(campo, t, (float(c[0]), float(c[1]), float(c[2])))
+        campo = cv2.blur(campo, (7, 7))
+    return np.clip(crop.astype(np.float32) + campo, 0, 255).astype(np.uint8)
 
 
 def _harmonize_gains(frames, C, labels, second, K, max_pairs=400_000):
