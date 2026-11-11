@@ -101,14 +101,19 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
 
     _avance(0.38, "Revisando la nitidez de las fotos")
     def _nitidez(fr):
-        g = cv2.imread(fr["jpg"], cv2.IMREAD_GRAYSCALE)
-        return cv2.Laplacian(cv2.resize(g, (g.shape[1] // 2, g.shape[0] // 2)), cv2.CV_64F).var() if g is not None else 0
+        g = cv2.imread(fr["jpg"], cv2.IMREAD_REDUCED_GRAYSCALE_2)       # media resolución, decodifica rápido
+        if g is None:
+            return 0
+        g = cv2.resize(g, (960, max(1, int(round(960 * g.shape[0] / g.shape[1])))), interpolation=cv2.INTER_AREA)
+        return cv2.Laplacian(g, cv2.CV_64F).var()           # a un mismo tamaño: comparable entre fotos de 2 MP y 12 MP
     from concurrent.futures import ThreadPoolExecutor as _TP
     from paralelo import nucleos as _nuc
     with _TP(max_workers=_nuc()) as ex:
         sharp = np.array(list(ex.map(_nitidez, frames)))
     # la nitidez pesa fuerte: una foto movida casi nunca gana si hay otra nítida
     sharp_w = np.clip((sharp / (np.median(sharp) + 1e-9)) ** 1.5, 0.1, 2.5)
+
+    zbuf_scale0 = zbuf_scale
 
     def _evaluar(k):
         """Qué triángulos ve bien la foto k y con qué puntaje (corre en varios hilos a la vez)."""
@@ -119,6 +124,7 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         R, t = Tc[:3, :3], Tc[:3, 3]
 
         # z-buffer reducido desde esta cámara
+        zbuf_scale = max(zbuf_scale0, int(round(w / 960.0)))       # fotos de 12 MP: mismo costo que las de 2 MP
         zw, zh = w // zbuf_scale, h // zbuf_scale
         uu, vv = np.meshgrid(np.arange(zw), np.arange(zh))
         uf = (uu + 0.5) * zbuf_scale - 0.5
@@ -167,7 +173,7 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         cosang = np.abs(np.sum(N[idx] * view, 1)) / dist
         # de frente, cerca, y lejos del borde de la foto (menos distorsión)
         edge = np.minimum.reduce([u[idx], w - u[idx], v[idx], h - v[idx]]) / (0.5 * min(w, h))
-        score = (cosang ** 2) / (dist ** 1.5) * sharp_w[k] * np.clip(edge, 0.25, 1.0)
+        score = (cosang ** 2) / (dist ** 1.5) * sharp_w[k] * np.clip(edge, 0.25, 1.0) * (w / 1920.0) ** 0.7
         # si algún vértice queda tapado, la foto sólo sirve como último recurso
         score = np.where(vvis, score, score * 0.02)
         return idx, score
@@ -259,8 +265,23 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     wh = np.array([[int(frames[k]["w"]), int(frames[k]["h"])] for k in range(K)])
     lo = np.maximum(np.floor(cmin).astype(int) - PAD, 0)
     hi = np.minimum(np.ceil(cmax).astype(int) + PAD, wh[chart_label] - 1)
-    ts = float(texture_scale)
-    csize = np.maximum(1, np.round((hi - lo + 1) * ts).astype(int))
+    # detalle máximo útil: con fotos de 12 MP un parche puede tener mucho más detalle del que se ve;
+    # se limita a LEVANTA_MM_POR_PIXEL (0.4 mm por defecto) para que el modelo no se haga ingobernable
+    mm_px = float(os.environ.get("LEVANTA_MM_POR_PIXEL", "0.4"))
+    tsc = np.full(nC, float(texture_scale))
+    if nC:
+        A3 = np.linalg.norm(np.cross(V[F[lab_faces, 1]] - V[F[lab_faces, 0]],
+                                     V[F[lab_faces, 2]] - V[F[lab_faces, 0]]), axis=1) / 2
+        d1, d2 = uvf[:, 1] - uvf[:, 0], uvf[:, 2] - uvf[:, 0]
+        Auv = np.abs(d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]) / 2
+        sa = np.bincount(chart_of, weights=A3, minlength=nC)
+        su = np.bincount(chart_of, weights=Auv, minlength=nC)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            px_m = np.sqrt(su / sa)                                   # píxeles de foto por metro de superficie
+        lim = 1000.0 / mm_px
+        tsc = np.where(np.isfinite(px_m) & (px_m > lim), lim / px_m, tsc)
+        tsc = np.minimum(tsc, float(texture_scale)).clip(0.05, 1.0)
+    csize = np.maximum(1, np.round((hi - lo + 1) * tsc[:, None]).astype(int))
     place, n_pages = _shelf_pack([tuple(x) for x in csize.tolist()], page_size)
     place = np.array(place, int).reshape(-1, 3)
 
@@ -286,26 +307,52 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     _avance(0.66, "Armando la textura con las fotos")
     order = np.argsort(chart_label, kind="stable")
     bounds = np.searchsorted(chart_label[order], np.arange(K + 1))
-    for j, k in enumerate(used):
-        if j % 10 == 0:
-            _avance(0.66 + 0.09 * j / max(1, len(used)), "Armando la textura con las fotos")
-        img = cv2.imread(frames[k]["jpg"], cv2.IMREAD_COLOR)
-        if harmonize:
-            img = np.clip(img.astype(np.float32) * gains[k][::-1], 0, 255).astype(np.uint8)
-        H_, W_ = img.shape[:2]
-        for c in order[bounds[k]:bounds[k + 1]]:
-            crop = img[lo[c, 1]:hi[c, 1] + 1, lo[c, 0]:hi[c, 0] + 1]
-            if nivel is not None:
-                crop = _aplicar_nivel(crop, nivel, f_ord[f_ini[c]:f_ini[c + 1]], uvf, lo[c])
-            if ts != 1.0:
-                crop = cv2.resize(crop, (int(csize[c, 0]), int(csize[c, 1])), interpolation=cv2.INTER_AREA)
-            pg, px, py = place[c]
-            pages[pg][py:py + crop.shape[0], px:px + crop.shape[1]] = crop
-            llenos[pg][py:py + crop.shape[0], px:px + crop.shape[1]] = True
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    from collections import deque
+    from paralelo import nucleos as _nucleos
+
+    def _leer(k):
+        return cv2.imread(frames[k]["jpg"], cv2.IMREAD_COLOR)
+
+    # las fotos se decodifican en varios hilos por adelantado (con 12 MP es lo más lento); el pegado es en orden
+    ventana = max(2, min(12, _nucleos()))
+    with _TPE(max_workers=ventana) as ex_img:
+        cola = deque()
+        it = iter(enumerate(used))
+
+        def _llenar():
+            while len(cola) < ventana:
+                try:
+                    j_, k_ = next(it)
+                except StopIteration:
+                    return
+                cola.append((j_, k_, ex_img.submit(_leer, k_)))
+        _llenar()
+        while cola:
+            j, k, fut = cola.popleft()
+            _llenar()
+            if j % 10 == 0:
+                _avance(0.66 + 0.09 * j / max(1, len(used)), f"Armando la textura con las fotos ({j + 1} de {len(used)})")
+            img = fut.result()
+            if img is None:
+                continue
+            g_bgr = gains[k][::-1].astype(np.float32) if harmonize else None
+            for c in order[bounds[k]:bounds[k + 1]]:
+                crop = img[lo[c, 1]:hi[c, 1] + 1, lo[c, 0]:hi[c, 0] + 1]
+                if g_bgr is not None:          # la ganancia se aplica solo al pedazo usado, no a toda la foto
+                    crop = np.clip(crop.astype(np.float32) * g_bgr, 0, 255).astype(np.uint8)
+                if nivel is not None:
+                    crop = _aplicar_nivel(crop, nivel, f_ord[f_ini[c]:f_ini[c + 1]], uvf, lo[c])
+                if tsc[c] != 1.0:
+                    crop = cv2.resize(crop, (int(csize[c, 0]), int(csize[c, 1])), interpolation=cv2.INTER_AREA)
+                pg, px, py = place[c]
+                pages[pg][py:py + crop.shape[0], px:px + crop.shape[1]] = crop
+                llenos[pg][py:py + crop.shape[0], px:px + crop.shape[1]] = True
+            del img
     if nC:
         lo_f, pl_f = lo[chart_of], place[chart_of]
-        cu = (uvf[..., 0] - lo_f[:, None, 0] + 0.5) * ts + pl_f[:, None, 1]
-        cv_ = (uvf[..., 1] - lo_f[:, None, 1] + 0.5) * ts + pl_f[:, None, 2]
+        cu = (uvf[..., 0] - lo_f[:, None, 0] + 0.5) * tsc[chart_of][:, None] + pl_f[:, None, 1]
+        cv_ = (uvf[..., 1] - lo_f[:, None, 1] + 0.5) * tsc[chart_of][:, None] + pl_f[:, None, 2]
         face_uv[lab_faces] = np.stack([cu / page_size, 1.0 - cv_ / page_size], -1)
         page_of[lab_faces] = pl_f[:, 0]
     if len(none):
@@ -360,6 +407,13 @@ def _rellenar_huecos(img, mask):
     return out
 
 
+def _img_chica(fr):
+    """Foto para medir colores: las de 12 MP se leen a media resolución (mucho más rápido). Devuelve (img, factor)."""
+    if int(fr["w"]) > 3000:
+        return cv2.imread(fr["jpg"], cv2.IMREAD_REDUCED_COLOR_2), 0.5
+    return cv2.imread(fr["jpg"], cv2.IMREAD_COLOR), 1.0
+
+
 def _project(fr, P):
     Tc = np.array(fr["T"], float).reshape(4, 4).T @ ARKIT_TO_CV
     Pc = (P - Tc[:3, 3]) @ Tc[:3, :3]
@@ -393,13 +447,13 @@ def _nivelar_costuras(frames, F, labels, lab_faces, corner_uv, gains, K, lam=0.1
         sel = orden[lim[k]:lim[k + 1]]
         if len(sel) == 0:
             continue
-        img = cv2.imread(frames[k]["jpg"], cv2.IMREAD_COLOR)
+        img, fz = _img_chica(frames[k])
         if img is None:
             continue
         img = cv2.blur(img, (5, 5)).astype(np.float32) * gains[k][::-1].astype(np.float32)
         h, w = img.shape[:2]
-        x = np.clip(np.round(puv[sel, 0]).astype(int), 0, w - 1)
-        y = np.clip(np.round(puv[sel, 1]).astype(int), 0, h - 1)
+        x = np.clip(np.round(puv[sel, 0] * fz).astype(int), 0, w - 1)
+        y = np.clip(np.round(puv[sel, 1] * fz).astype(int), 0, h - 1)
         col[sel] = img[y, x]
     # costuras: pares consecutivos del mismo vértice (uniq está ordenado por vértice)
     mismo = np.nonzero(pv[1:] == pv[:-1])[0]
@@ -471,7 +525,7 @@ def _harmonize_gains(frames, C, labels, second, K, max_pairs=400_000):
         ib = np.nonzero(lb == k)[0]
         if len(ia) == 0 and len(ib) == 0:
             continue
-        img = cv2.imread(frames[k]["jpg"], cv2.IMREAD_COLOR)
+        img, fz = _img_chica(frames[k])
         if img is None:
             continue
         img = cv2.blur(img, (9, 9)).astype(np.float64)[..., ::-1]
@@ -480,8 +534,8 @@ def _harmonize_gains(frames, C, labels, second, K, max_pairs=400_000):
             if len(sel) == 0:
                 continue
             u, v = _project(frames[k], C[pairs[sel]])
-            u = np.clip(np.round(u).astype(int), 0, w - 1)
-            v = np.clip(np.round(v).astype(int), 0, h - 1)
+            u = np.clip(np.round(u * fz).astype(int), 0, w - 1)
+            v = np.clip(np.round(v * fz).astype(int), 0, h - 1)
             out[sel] = img[v, u]
     ok = ((colA > 12) & (colA < 245) & (colB > 12) & (colB < 245)).all(1)
     la, lb, colA, colB = la[ok], lb[ok], colA[ok], colB[ok]
@@ -535,7 +589,7 @@ def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
         uv_unique = np.zeros((len(uk), 2))
         uv_unique[inv] = uvs
         faces = inv.reshape(-1, 3)
-        ok_, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+        ok_, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])
         rgb = Image.open(io.BytesIO(enc.tobytes()))          # conserva formato JPEG dentro del GLB
         rgb.load()
         mat = trimesh.visual.material.PBRMaterial(baseColorTexture=rgb, metallicFactor=0.0, roughnessFactor=1.0,
@@ -547,7 +601,7 @@ def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
 
         # OBJ (Z arriba, milímetros): Navisworks lo abre con sus fotos
         tex_name = f"textura_{pg}.jpg"
-        cv2.imwrite(os.path.join(obj_dir, tex_name), img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        cv2.imwrite(os.path.join(obj_dir, tex_name), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
         mtl_lines += [f"newmtl pagina_{pg}", "Ka 1 1 1", "Kd 1 1 1", "Ks 0 0 0", "d 1", "illum 1",
                       f"map_Kd {tex_name}", ""]
         vz = Vz[uk[:, 0].astype(int)]

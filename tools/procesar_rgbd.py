@@ -132,6 +132,52 @@ def load_frames(dirs):
     return meta, frames
 
 
+def cargar_fotos_hr(dirs):
+    """Fotos de 12 MP que mandó el iPhone (solo para la textura): cada una con su propia posición."""
+    fotos = []
+    for d in dirs:
+        p = os.path.join(d, "fotos_hr.jsonl")
+        if not os.path.exists(p):
+            continue
+        with open(p) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    fr = json.loads(line)
+                except ValueError:
+                    continue
+                fr["jpg"] = os.path.join(d, "fotos_hr", f"{int(fr['i']):06d}.jpg")
+                if os.path.exists(fr["jpg"]) and os.path.getsize(fr["jpg"]) > 1000 and "T" in fr:
+                    fotos.append(fr)
+    return fotos
+
+
+def corregir_fotos_hr(fotos, frames, T_antes):
+    """Aplica a cada foto de 12 MP la misma corrección de deriva que recibió el cuadro de profundidad
+    más cercano en el tiempo (T_antes: posiciones originales de los cuadros). Devuelve cuántas se corrigieron."""
+    ts = np.array([fr.get("t", np.nan) for fr in frames], float)
+    ok = np.isfinite(ts)
+    if not fotos or not ok.any():
+        return 0
+    idx_ok = np.nonzero(ok)[0]
+    n = 0
+    for ft in fotos:
+        if "t" not in ft:
+            continue
+        j = idx_ok[np.argmin(np.abs(ts[idx_ok] - float(ft["t"])))]
+        if abs(ts[j] - float(ft["t"])) > 1.0:
+            continue
+        Tn = np.array(frames[j]["T"], float).reshape(4, 4).T
+        To = np.array(T_antes[j], float).reshape(4, 4).T
+        W = Tn @ np.linalg.inv(To)
+        Tp = np.array(ft["T"], float).reshape(4, 4).T
+        ft["T"] = list((W @ Tp).T.reshape(-1))
+        n += 1
+    return n
+
+
 def pose_matrix(fr):
     T = np.array(fr["T"], dtype=float).reshape(4, 4).T   # viene por columnas
     return T
@@ -514,6 +560,10 @@ def main():
         log(f"Paquete: {len(frames)} cuadros en {len(dirs)} parte(s), "
             f"profundidad {meta['depthWidth']}×{meta['depthHeight']}")
 
+        fotos_hr = cargar_fotos_hr(dirs)
+        if fotos_hr:
+            log(f"Fotos de máxima resolución: {len(fotos_hr)} ({fotos_hr[0]['w']}×{fotos_hr[0]['h']})")
+        T_antes = [list(fr["T"]) for fr in frames]
         ia = None
         if args.ia:
             from ia_profundidad import RefinadorIA, disponible
@@ -578,6 +628,10 @@ def main():
             texturizar.AVANCE = lambda f, t: avance("fotos", f, t)
             texturizar.EXPORTAR_OBJ = todos
             kf = [f for f in frames if f.get("kf", True)] or frames     # fotos clave (las más nítidas)
+            if fotos_hr:
+                n_hr = corregir_fotos_hr(fotos_hr, frames, T_antes)
+                log(f"  {n_hr} fotos de máxima resolución con la deriva corregida")
+                kf = kf + fotos_hr        # el texturizador prefiere las de más resolución
             # Modelo con fotos "completo": se vuelve a unir todo aceptando también lecturas de confianza
             # media, ángulos más inclinados y hasta 5 m. Cubre piso, objetos oscuros y lo lejano que la
             # malla exacta descarta (en un escaneo real: 67 % -> 89 % de lo que se ve en las fotos).

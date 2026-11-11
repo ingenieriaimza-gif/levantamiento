@@ -239,6 +239,12 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             }
         }
         config.worldAlignment = .gravity
+        // Fotos de 12 MP: si iOS ofrece un formato pensado para capturarlas y no cambia la resolución
+        // del video normal (la profundidad y el seguimiento quedan igual), se usa.
+        if let hr = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing,
+           hr.imageResolution.width <= 2000 {
+            config.videoFormat = hr
+        }
         let options: ARSession.RunOptions = reset ? [.resetTracking, .removeExistingAnchors] : []
         view.session.run(config, options: options)
     }
@@ -484,6 +490,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 }
             }
         }
+        if savedKeyframe { requestHighRes(session: session, at: frame.timestamp) }
         if link.isConnected, let depth = chosen,
            savedKeyframe || frame.timestamp - lastStreamTime >= 0.25 {
             lastStreamTime = frame.timestamp
@@ -545,6 +552,52 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         if fast != tooFastState && (fast || calm) {
             tooFastState = fast
             DispatchQueue.main.async { self.tooFast = fast }
+        }
+    }
+
+    // MARK: Fotos de 12 MP (4032×3024) para la textura
+
+    private let hrLock = NSLock()
+    private let hrQueue = DispatchQueue(label: "levanta.hr", qos: .userInitiated)
+    private var hrBusy = false
+    private var hrLastTime: TimeInterval = 0
+    private var hrFailures = 0
+    private var hrSent = 0
+    private var hrDisabled = false
+
+    /// En cada foto clave pide a iOS una foto de máxima resolución (con su propia posición e intrínsecos)
+    /// y la manda a la PC, que la usa para la textura. La profundidad y la fusión siguen con los cuadros normales.
+    private func requestHighRes(session: ARSession, at time: TimeInterval) {
+        guard link.isConnected, !hrDisabled,
+              time - hrLastTime >= 0.4, link.backlog <= 4 else { return }
+        hrLock.lock()
+        if hrBusy { hrLock.unlock(); return }
+        hrBusy = true
+        hrLock.unlock()
+        hrLastTime = time
+        session.captureHighResolutionFrame { [weak self] hrFrame, error in
+            guard let self else { return }
+            guard let hrFrame, error == nil else {
+                self.hrLock.lock()
+                self.hrBusy = false
+                self.hrFailures += 1
+                if self.hrFailures >= 6 && self.hrSent == 0 { self.hrDisabled = true }     // este iPhone no puede
+                self.hrLock.unlock()
+                return
+            }
+            self.hrQueue.async {
+                if let jpg = FrameCodec.jpeg(hrFrame, scale: 1.0, quality: 0.93) {
+                    var h = FrameCodec.header(hrFrame, index: 0, scale: 1.0)
+                    h["nj"] = jpg.count
+                    if let msg = FrameCodec.pack(kind: 7, header: h, payload: [jpg]) {
+                        self.link.send(msg, important: true)
+                    }
+                }
+                self.hrLock.lock()
+                self.hrBusy = false
+                self.hrSent += 1
+                self.hrLock.unlock()
+            }
         }
     }
 

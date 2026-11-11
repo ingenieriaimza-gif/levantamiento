@@ -350,6 +350,12 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
         }
     }
 
+    /// Mensajes que aún no terminan de salir (para no apilar fotos grandes si la red va lenta).
+    var backlog: Int {
+        lock.lock(); defer { lock.unlock() }
+        return inflight
+    }
+
     func sendStart(name: String) {
         let info: [String: Any] = ["nombre": name, "dispositivo": "iPhone",
                                    "sistema": ProcessInfo.processInfo.operatingSystemVersionString]

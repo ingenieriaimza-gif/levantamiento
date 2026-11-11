@@ -50,7 +50,7 @@ import open3d as o3d  # noqa: E402
 from aiohttp import WSMsgType, web  # noqa: E402
 
 ARKIT_TO_CV = np.diag([1.0, -1.0, -1.0, 1.0])
-MSG_FRAME, MSG_START, MSG_END, MSG_DISCARD, MSG_MEASURES, MSG_ZONES = 1, 2, 3, 4, 5, 6
+MSG_FRAME, MSG_START, MSG_END, MSG_DISCARD, MSG_MEASURES, MSG_ZONES, MSG_PHOTO = 1, 2, 3, 4, 5, 6, 7
 MSG_MESH, MSG_STATUS, MSG_MEASURES_OUT = 10, 11, 12
 
 
@@ -130,6 +130,22 @@ class Session:
         dw, dh = int(h["dw"]), int(h["dh"])
         self.dims = {"imageWidth": int(h["w"]), "imageHeight": int(h["h"]), "depthWidth": dw, "depthHeight": dh}
         self._integrate(h, jpeg, depth, conf, dw, dh)
+
+    def add_photo(self, h, jpeg):
+        """Foto de máxima resolución (12 MP) con su propia posición: solo sirve para la textura."""
+        if not len(jpeg):
+            return
+        n = getattr(self, "fotos_hr", 0)
+        fdir = os.path.join(self.dir, "fotos_hr")
+        os.makedirs(fdir, exist_ok=True)
+        name = f"{n:06d}"
+        with open(os.path.join(fdir, name + ".jpg"), "wb") as f:
+            f.write(jpeg)
+        line = {k: h[k] for k in ("t", "fx", "fy", "cx", "cy", "w", "h", "T") if k in h}
+        line["i"] = n
+        with open(os.path.join(self.dir, "fotos_hr.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(line) + "\n")
+        self.fotos_hr = n + 1
 
     def _integrate(self, h, jpeg, depth, conf, dw, dh):
         d = np.frombuffer(depth, dtype="<u2").reshape(dh, dw).copy()
@@ -302,6 +318,12 @@ class Server:
                     await loop.run_in_executor(self.pool, self.session.add_frame, h, jpeg, depth, conf)
                     self.status["cuadros"] = self.session.frames
                     self.status["clave"] = self.session.keyframes
+                elif kind == MSG_PHOTO and self.session is not None:
+                    if not self.disco_lleno:
+                        nj = int(h["nj"])
+                        await loop.run_in_executor(self.pool, self.session.add_photo, h, bytes(data[:nj]))
+                        self._bytes_cuadros += nj
+                        self.status["fotos_hr"] = getattr(self.session, "fotos_hr", 0)
                 elif kind == MSG_ZONES:
                     # piezas enfocadas en el iPhone: se reconstruyen a 2 mm al crear el modelo
                     zonas = [z for z in h.get("zonas", []) if "centro" in z and "medio" in z][:50]
