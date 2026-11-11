@@ -136,6 +136,7 @@ def pick_folder_dialog(initial):
 
 # ------------------------------------------------------------------ IA (módulo opcional)
 
+MAX_USDZ_IPHONE = 150 * 1024 * 1024      # más que esto no se ofrece al iPhone
 IA_DIR = os.path.join(RAIZ, "ia")
 IA_PAQUETES = os.path.join(IA_DIR, "paquetes")
 IA_MODELOS = os.path.join(IA_DIR, "modelos")
@@ -400,6 +401,8 @@ class Gestion:
                 if live and os.path.normpath(live) == os.path.normpath(d):
                     continue
                 st = os.stat(p)
+                if st.st_size > MAX_USDZ_IPHONE:       # modelos enormes (millones de triángulos) cierran la app del iPhone
+                    continue
                 items.append({"carpeta": name, "nombre": name.replace("RGBD_", ""),
                               "fecha": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
                               "version": int(st.st_mtime), "mb": round(st.st_size / 1e6, 1),
@@ -413,6 +416,8 @@ class Gestion:
         p = os.path.join(d, "resultado", "modelo_texturizado.usdz")
         if not os.path.exists(p):
             raise web.HTTPNotFound(text="Este escaneo no tiene modelo terminado")
+        if os.path.getsize(p) > MAX_USDZ_IPHONE:
+            raise web.HTTPNotFound(text="Este modelo es demasiado pesado para el iPhone")
         return web.FileResponse(p, headers={"Content-Type": "model/vnd.usdz+zip"})
 
     async def tel_medidas(self, request):
