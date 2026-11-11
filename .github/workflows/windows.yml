@@ -88,12 +88,10 @@ jobs:
           Get-Content srv.log -Tail 25
           $res = "prueba\RGBD_prueba_simulada\resultado"
           Get-ChildItem $res | Format-Table Name, Length
-          Get-Content "$res\reporte.txt"
-          # solo se entrega el FBX (Navisworks); GLB y USDZ son para "Revisar 3D"
-          foreach ($f in "obj\modelo_navisworks.fbx", "modelo_texturizado.usdz", "modelo_texturizado.glb") {
-            if (-not (Test-Path "$res\$f")) { Write-Error "Falta $f" }
-          }
-          foreach ($f in "modelo_solidworks.3mf", "nube_fusionada.e57", "malla_solidworks.stl", "obj\modelo_texturizado.obj") {
+          # al terminar solo queda el FBX (Navisworks) con sus texturas; todo lo demás se borra
+          if (-not (Test-Path "$res\obj\modelo_navisworks.fbx")) { Write-Error "Falta obj\modelo_navisworks.fbx" }
+          if (-not (Test-Path "$res\obj\textura_0.jpg")) { Write-Error "Faltan las texturas" }
+          foreach ($f in "modelo_texturizado.usdz", "modelo_texturizado.glb", "reporte.txt", "poses_corregidas.json", "modelo_solidworks.3mf", "nube_fusionada.e57", "malla_solidworks.stl", "obj\modelo_texturizado.obj") {
             if (Test-Path "$res\$f") { Write-Error "Sobra $f (ya no se debe crear)" }
           }
           Stop-Process -Id $srv.Id -Force

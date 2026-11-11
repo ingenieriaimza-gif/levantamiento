@@ -500,6 +500,7 @@ class Server:
                 self.status["progreso"] = None
                 await self.send_status(f"No se pudo crear el modelo: {fallo} Detalle en resultado\\error.txt")
             else:
+                self._dejar_solo_navisworks(out)
                 self.status["resultados"].append(sdir)
                 self.status["progreso"] = {"carpeta": os.path.basename(sdir), "fraccion": 1.0,
                                            "etapa": "Listo", "restante_s": 0,
@@ -508,6 +509,29 @@ class Server:
         finally:
             self.status["procesando"] = False
             await self.send_status()
+
+    @staticmethod
+    def _dejar_solo_navisworks(out):
+        """Ya con el FBX listo, borra lo demás del resultado (GLB, USDZ, reporte, poses...): solo queda la
+        carpeta obj con el FBX y sus texturas. Si el FBX no se creó, no se borra nada."""
+        import shutil
+        if not os.path.exists(os.path.join(out, "obj", "modelo_navisworks.fbx")):
+            return
+        obj = os.path.join(out, "obj")
+        for fn in os.listdir(obj):
+            if not (fn == "modelo_navisworks.fbx" or (fn.startswith("textura_") and fn.endswith(".jpg"))):
+                try:
+                    os.remove(os.path.join(obj, fn))
+                except OSError:
+                    pass
+        for fn in os.listdir(out):
+            if fn == "obj":
+                continue
+            p = os.path.join(out, fn)
+            try:
+                shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+            except OSError:
+                pass
 
     async def photo_view(self, sdir):
         """Vista foto-realista (Gaussian Splatting) en la tarjeta de video. Si falla, el modelo ya quedó listo."""
