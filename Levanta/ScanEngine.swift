@@ -1150,11 +1150,18 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     func makeReviewData(mode: ColorMode,
                         completion: @escaping (SCNGeometry?, CloudStats, [SIMD3<Float>]) -> Void) {
         queue.async {
-            let geometry = self.buildGeometry(mode: mode, maxPoints: 1_500_000,
-                                              pointSize: 4, maxRadius: 3)
-            let stats = self.computeStats()
-            let pick = self.reliablePoints(maxPoints: 1_500_000)
-            DispatchQueue.main.async { completion(geometry, stats, pick) }
+            // más liviano: cada vez que se abre se arman copias de la nube; con millones de puntos eso, sumado a la
+            // memoria del escaneo, cerraba la app. Aquí 800 mil puntos (la PC sigue recibiendo todo sin recorte).
+            var result: (SCNGeometry?, CloudStats, [SIMD3<Float>])?
+            autoreleasepool {
+                let geometry = self.buildGeometry(mode: mode, maxPoints: 800_000, pointSize: 4, maxRadius: 3)
+                let stats = self.computeStats()
+                let pick = self.reliablePoints(maxPoints: 800_000)
+                result = (geometry, stats, pick)
+            }
+            DispatchQueue.main.async {
+                if let r = result { completion(r.0, r.1, r.2) } else { completion(nil, CloudStats(points: 0, size: .zero, center: .zero, weak: 0), []) }
+            }
         }
     }
 

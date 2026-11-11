@@ -130,6 +130,8 @@ struct ReviewView: View {
         }
         .onAppear(perform: start)
         .onDisappear {
+            content = nil                  // suelta la copia de la nube al cerrar
+            pickPoints = []
             engine.setReviewing(false)
             engine.measure.active = false
             finalMeasure.active = false
