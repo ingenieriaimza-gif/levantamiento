@@ -136,7 +136,7 @@ def pick_folder_dialog(initial):
 
 # ------------------------------------------------------------------ IA (módulo opcional)
 
-MAX_USDZ_IPHONE = 150 * 1024 * 1024      # más que esto no se ofrece al iPhone
+MAX_USDZ_IPHONE = 40 * 1024 * 1024       # más que esto no se ofrece al iPhone (las texturas grandes lo cierran)
 IA_DIR = os.path.join(RAIZ, "ia")
 IA_PAQUETES = os.path.join(IA_DIR, "paquetes")
 IA_MODELOS = os.path.join(IA_DIR, "modelos")

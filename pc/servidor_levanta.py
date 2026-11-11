@@ -514,7 +514,7 @@ class Server:
     @staticmethod
     def _dejar_solo_navisworks(out):
         """Ya con el FBX listo, borra lo demás del resultado (GLB, USDZ, reporte, poses...): solo queda la
-        carpeta obj con el FBX y sus texturas. Si el FBX no se creó, no se borra nada."""
+        carpeta obj con el FBX y sus texturas, y el USDZ ligero para Revisar 3D en el iPhone. Si el FBX no se creó, no se borra nada."""
         import shutil
         if not os.path.exists(os.path.join(out, "obj", "modelo_navisworks.fbx")):
             return False
@@ -526,7 +526,7 @@ class Server:
                 except OSError:
                     pass
         for fn in os.listdir(out):
-            if fn == "obj":
+            if fn in ("obj", "modelo_texturizado.usdz"):      # el USDZ ligero es para "Revisar 3D" en el iPhone
                 continue
             p = os.path.join(out, fn)
             try:
