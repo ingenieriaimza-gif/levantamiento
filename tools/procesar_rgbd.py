@@ -43,6 +43,39 @@ Y_UP_TO_Z_UP = np.array([[1, 0, 0, 0],
                          [0, 0, 0, 1]], dtype=float)
 
 
+def rumbo_de_paredes(mesh):
+    """Giro (alrededor de la vertical, en radianes) que deja las paredes paralelas a los ejes X e Y.
+    ARKit solo conoce la vertical: el escaneo sale girado un ángulo cualquiera. Se mide con las normales de las
+    superficies verticales (paredes, muebles), ponderadas por área; se toma el giro menor (de -45° a 45°)."""
+    m = o3d.geometry.TriangleMesh(mesh)
+    m.compute_triangle_normals()
+    N = np.asarray(m.triangle_normals)
+    V, F = np.asarray(m.vertices), np.asarray(m.triangles)
+    area = np.linalg.norm(np.cross(V[F[:, 1]] - V[F[:, 0]], V[F[:, 2]] - V[F[:, 0]]), axis=1) / 2
+    vert = np.abs(N[:, 1]) < 0.25                       # superficies verticales (Y es arriba en ARKit)
+    if vert.sum() < 100:
+        return 0.0
+    th = np.arctan2(N[vert, 2], N[vert, 0])
+    w = area[vert] * (1 - np.abs(N[vert, 1]))
+    z = np.sum(w * np.exp(4j * th)) / np.sum(w)
+    if np.abs(z) < 0.15:                                # sin direcciones dominantes claras: no se gira
+        return 0.0
+    phi = float(np.angle(z) / 4.0)
+    # afinar: repetir solo con lo que ya está casi alineado (±8°), así los muebles en diagonal no estorban
+    for _ in range(4):
+        rel = (th - phi + np.pi / 4) % (np.pi / 2) - np.pi / 4          # distancia a la dirección de pared más cercana
+        sel = np.abs(rel) < np.radians(8)
+        if sel.sum() < 50:
+            break
+        phi += float(np.sum(w[sel] * rel[sel]) / np.sum(w[sel]))
+    return phi
+
+
+def giro_vertical(phi):
+    c, s = np.cos(phi), np.sin(phi)
+    return np.array([[c, 0, s, 0], [0, 1, 0, 0], [-s, 0, c, 0], [0, 0, 0, 1]], dtype=float)
+
+
 # Open3D (VoxelBlockGrid) toma el píxel de profundidad truncando la coordenada proyectada en vez de
 # redondearla; sumar medio píxel al centro óptico equivale a usar el píxel más cercano.
 PIXEL_OFFSET = float(os.environ.get("RGBD_PIXEL_OFFSET", "0.5"))
@@ -604,6 +637,7 @@ def main():
             mesh, pcd = extract(vbg, args.lecturas)
             del vbg
             gc.collect()
+        A_Z = Y_UP_TO_Z_UP.copy()
         scale = 1.0
         if args.escala:
             real, measured = args.escala
@@ -685,6 +719,10 @@ def main():
                     tex_mesh.compute_vertex_normals()
                     target_tex = len(tex_mesh.triangles) + 1
                     del fuera, dentro
+            if os.environ.get("LEVANTA_ESCUADRAR", "1") != "0" and len(tex_mesh.triangles):
+                phi = rumbo_de_paredes(tex_mesh)       # con la malla final que se entrega
+                A_Z = Y_UP_TO_Z_UP @ giro_vertical(phi)        # paredes paralelas a los ejes X e Y
+                log(f"Escuadrado: el escaneo estaba girado {np.degrees(phi):.2f}° respecto a sus paredes; se endereza")
             holder, hibrida = [tex_mesh], tex_mesh is not mesh
             del tex_mesh
             gc.collect()
@@ -692,10 +730,10 @@ def main():
                                     target_triangles=target_tex,
                                     page_size=args.pagina_textura,
                                     texture_scale=args.escala_textura,
-                                    to_z_up=Y_UP_TO_Z_UP, scale=scale)
+                                    to_z_up=A_Z, scale=scale)
 
         # A Z arriba + escala
-        M = Y_UP_TO_Z_UP.copy()
+        M = A_Z.copy()
         M[:3, :3] *= scale
         mesh.transform(M)
         pcd.transform(M)
