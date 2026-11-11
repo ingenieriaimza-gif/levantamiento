@@ -241,10 +241,14 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         config.worldAlignment = .gravity
         // Fotos de 12 MP: si iOS ofrece un formato pensado para capturarlas y no cambia la resolución
         // del video normal (la profundidad y el seguimiento quedan igual), se usa.
-        if Self.highResPhotos,
-           let hr = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing,
-           hr.imageResolution.width <= 2000 {
-            config.videoFormat = hr
+        // Video 4K (3840×2160): fotos con el doble de detalle y sin sonido de obturador. Si este iPhone no entrega
+        // profundidad con ese formato, o la profundidad no cubre lo mismo que la foto, se vuelve al formato normal.
+        usingHiRes = false
+        if Self.hiResVideo, !UserDefaults.standard.bool(forKey: "hiResMalo"),
+           let f4k = ARWorldTrackingConfiguration.recommendedVideoFormatFor4KResolution {
+            config.videoFormat = f4k
+            usingHiRes = true
+            hiResFramesChecked = 0
         }
         let options: ARSession.RunOptions = reset ? [.resetTracking, .removeExistingAnchors] : []
         view.session.run(config, options: options)
@@ -431,6 +435,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     // MARK: ARSessionDelegate (se llama en `queue`)
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        if usingHiRes { checkHiRes(frame) }
         if frame.timestamp - lastDistanceTime >= 0.25 {
             lastDistanceTime = frame.timestamp
             let d = centerDepth(frame)
@@ -560,6 +565,32 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     /// Apagado: iOS reproduce el sonido de obturador en cada foto de 12 MP y la app se cerró en una prueba.
     static let highResPhotos = false
+    static let hiResVideo = true
+    private var usingHiRes = false
+    private var hiResFramesChecked = 0
+
+    /// Comprueba (en los primeros cuadros) que el formato 4K trae profundidad que cubre lo mismo que la foto.
+    /// Si no, lo recuerda y reinicia la sesión con el formato normal (sin perder la posición).
+    private func checkHiRes(_ frame: ARFrame) {
+        guard usingHiRes else { return }
+        hiResFramesChecked += 1
+        if let d = frame.sceneDepth ?? frame.smoothedSceneDepth {
+            let dw = Double(CVPixelBufferGetWidth(d.depthMap)), dh = Double(CVPixelBufferGetHeight(d.depthMap))
+            let iw = Double(frame.camera.imageResolution.width), ih = Double(frame.camera.imageResolution.height)
+            if abs(dw / dh - iw / ih) / (iw / ih) < 0.03 {
+                usingHiRes = false            // todo bien; ya no se revisa
+                return
+            }
+        } else if hiResFramesChecked < 90 {
+            return
+        }
+        usingHiRes = false
+        UserDefaults.standard.set(true, forKey: "hiResMalo")
+        DispatchQueue.main.async {
+            self.statusMessage = "Este iPhone no combina video 4K con el LiDAR: se usa el formato normal."
+            self.startSession(reset: false)
+        }
+    }
 
     private let hrLock = NSLock()
     private let hrQueue = DispatchQueue(label: "levanta.hr", qos: .userInitiated)
@@ -607,9 +638,11 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     /// Envía un cuadro completo (foto a resolución completa, profundidad, confianza y posición) a la PC.
     private func streamFrame(_ frame: ARFrame, depth: ARDepthData, keyframe: Bool, mask: [Bool]?) {
-        guard let jpg = FrameCodec.jpeg(frame, scale: 1.0, quality: 0.85),
+        // los cuadros que no son fotos clave solo sirven para la forma: a media resolución si la foto es 4K
+        let sc: CGFloat = (!keyframe && CVPixelBufferGetWidth(frame.capturedImage) > 2500) ? 0.5 : 1.0
+        guard let jpg = FrameCodec.jpeg(frame, scale: sc, quality: 0.85),
               let dc = FrameCodec.depthAndConfidence(depth, mask: mask) else { return }
-        var h = FrameCodec.header(frame, index: streamIndex, scale: 1.0)
+        var h = FrameCodec.header(frame, index: streamIndex, scale: Float(sc))
         h["dw"] = dc.w
         h["dh"] = dc.h
         h["kf"] = keyframe
