@@ -241,7 +241,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         config.worldAlignment = .gravity
         // Fotos de 12 MP: si iOS ofrece un formato pensado para capturarlas y no cambia la resolución
         // del video normal (la profundidad y el seguimiento quedan igual), se usa.
-        if let hr = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing,
+        if Self.highResPhotos,
+           let hr = ARWorldTrackingConfiguration.recommendedVideoFormatForHighResolutionFrameCapturing,
            hr.imageResolution.width <= 2000 {
             config.videoFormat = hr
         }
@@ -557,6 +558,9 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: Fotos de 12 MP (4032×3024) para la textura
 
+    /// Apagado: iOS reproduce el sonido de obturador en cada foto de 12 MP y la app se cerró en una prueba.
+    static let highResPhotos = false
+
     private let hrLock = NSLock()
     private let hrQueue = DispatchQueue(label: "levanta.hr", qos: .userInitiated)
     private var hrBusy = false
@@ -568,7 +572,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     /// En cada foto clave pide a iOS una foto de máxima resolución (con su propia posición e intrínsecos)
     /// y la manda a la PC, que la usa para la textura. La profundidad y la fusión siguen con los cuadros normales.
     private func requestHighRes(session: ARSession, at time: TimeInterval) {
-        guard link.isConnected, !hrDisabled,
+        guard Self.highResPhotos, link.isConnected, !hrDisabled,
               time - hrLastTime >= 0.4, link.backlog <= 4 else { return }
         hrLock.lock()
         if hrBusy { hrLock.unlock(); return }

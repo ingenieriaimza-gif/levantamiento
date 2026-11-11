@@ -464,9 +464,9 @@ class Gestion:
             return web.json_response({"ok": False, "mensaje": "Ya se está creando otro modelo; espera a que termine"})
         sess = self.server.session
         if sess is not None and os.path.normpath(sess.dir) == os.path.normpath(d):
-            if self.server.phone is not None:
+            if self.server.phone is not None and not data.get("forzar"):
                 return web.json_response({"ok": False, "mensaje": "El iPhone sigue conectado: termínalo desde el iPhone"})
-            # el iPhone se desconectó sin terminar: se cierra aquí y se crea el modelo con lo recibido
+            # el iPhone se desconectó (o se cerró la app) sin terminar: se cierra aquí y se crea el modelo con lo recibido
             self.server.session = None
             await asyncio.get_running_loop().run_in_executor(self.server.pool, sess.close)
         escala = data.get("escala")

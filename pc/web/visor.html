@@ -652,11 +652,11 @@ async function loadScans() {
       const body = el('div', { className: 'scan-body' });
       const actions = el('div', { className: 'row' });
 
-      const crear = (texto) => {
+      const crear = (texto, forzar) => {
         const b = el('button', { className: 'btn primary', type: 'button', textContent: texto });
         b.onclick = async () => {
           b.disabled = true; b.textContent = 'Creando el modelo… (unos minutos)';
-          const r = await post('/api/reprocesar', { carpeta: s.carpeta });
+          const r = await post('/api/reprocesar', { carpeta: s.carpeta, forzar: !!forzar });
           if (!r.ok) { b.disabled = false; b.textContent = texto; body.append(el('div', { className: 'muted', textContent: r.mensaje })); }
           else setTimeout(loadScans, 1500);
         };
@@ -674,7 +674,8 @@ async function loadScans() {
         body.append(slot);
       } else if (s.en_curso && s.iphone_conectado) {
         pills.append(el('span', { className: 'pill warn', textContent: 'escaneando' }));
-        body.append(el('div', { className: 'muted', textContent: 'Cuando termines, en el iPhone toca "Terminar y procesar en la PC".' }));
+        body.append(el('div', { className: 'muted', textContent: 'Cuando termines, en el iPhone toca "Terminar y procesar en la PC". Si la app del iPhone se cerró y aquí sigue como "escaneando", usa el botón: se crea el modelo con lo que ya llegó.' }));
+        actions.append(crear('La app se cerró: terminar y crear el modelo 3D', true));
       } else if (s.en_curso) {
         pills.append(el('span', { className: 'pill warn', textContent: 'sin terminar' }));
         body.append(el('div', { className: 'muted', textContent: 'El iPhone se desconectó antes de terminar. Lo recibido está guardado: puedes crear el modelo con eso.' }));
