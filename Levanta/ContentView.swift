@@ -232,7 +232,6 @@ struct ContentView: View {
                     Label("Revisar 3D", systemImage: "rotate.3d")
                         .font(.footnote.weight(.semibold))
                 }
-                .disabled(engine.isScanning)
 
                 Button {
                     showScans = true

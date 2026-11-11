@@ -130,6 +130,7 @@ struct ReviewView: View {
         }
         .onAppear(perform: start)
         .onDisappear {
+            engine.setReviewing(false)
             engine.measure.active = false
             finalMeasure.active = false
         }
@@ -168,8 +169,7 @@ struct ReviewView: View {
                     }
                 }
             }
-            if engine.lastLiveMesh != nil { Button("En vivo (PC)") { select(.live) } }
-            if engine.pointCount > 0 { Button("Nube del iPhone") { select(.cloud) } }
+            if engine.pointCount > 0 { Button("Nube de puntos") { select(.cloud) } }
         } label: {
             HStack(spacing: 4) {
                 Text(sourceTitle).lineLimit(1)
@@ -182,6 +182,7 @@ struct ReviewView: View {
     }
 
     private func start() {
+        engine.setReviewing(true)       // la sesión de seguimiento sigue viva; solo se dejan de sumar puntos mientras miras
         engine.measure.onChange = { [weak engine] list in engine?.sendMeasures(list) }
         // Los modelos finales de la PC ya no se abren aquí: eran enormes (millones de triángulos y muchas texturas),
         // la app se cerraba por memoria al abrirlos, y la PC ya no guarda el USDZ (solo el FBX para Navisworks).
@@ -191,14 +192,8 @@ struct ReviewView: View {
 
     /// Lo más útil primero: el modelo final si es más nuevo que lo último escaneado; si no, lo en vivo.
     private func chooseDefault() {
-        let liveTime = engine.lastLiveMeshTime?.timeIntervalSince1970 ?? 0
-        if let m = models.first, Double(m.version) >= liveTime - 5 {
-            select(m.foto ? .photo(m) : .final(m))
-        } else if engine.lastLiveMesh != nil {
-            select(.live)
-        } else if let m = models.first {
-            select(.final(m))
-        } else if engine.pointCount > 0 {
+        // solo la nube de puntos del iPhone (la misma que ves al escanear)
+        if engine.pointCount > 0 {
             select(.cloud)
         } else {
             loading = nil

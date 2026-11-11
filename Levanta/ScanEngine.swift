@@ -163,6 +163,10 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var lastStreamTime: TimeInterval = 0
     private var streamIndex = 0
     private let gaps = GapFinder()
+    private var reviewing = false          // mirando Revisar 3D: el seguimiento sigue, pero no se suman puntos
+
+    /// Al abrir/cerrar Revisar 3D en pleno escaneo: la sesión de ARKit no se pausa (así no se corren los objetos al seguir).
+    func setReviewing(_ on: Bool) { queue.async { self.reviewing = on } }
     private var sessionName = ""        // solo en el hilo principal
     private var tintLiveMesh = true
 
@@ -467,7 +471,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             lastCenterDepth = d
             DispatchQueue.main.async { self.centerDistance = d }
         }
-        guard scanning, tracking else { return }
+        guard scanning, tracking, !reviewing else { return }
         if lostWhileScanning {
             // después de perder la ubicación solo se sigue si lo que ve el LiDAR coincide con lo ya
             // escaneado; si no, la posición quedó corrida y se duplicarían superficies
