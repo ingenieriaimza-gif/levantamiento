@@ -434,7 +434,7 @@ class Server:
         cmds = [
             [py, "-I", "-X", "utf8", os.path.join(TOOLS, "procesar_rgbd.py"), sdir, "--salida", out,
              "--voxel", "0.004", "--dmax", "3.5", "--conf", "2", "--lecturas", "2",
-             "--triangulos-textura", "1500000"] + (["--escala", str(escala), "1"] if escala else [])
+             "--triangulos-textura", "3000000"] + (["--escala", str(escala), "1"] if escala else [])
             + (["--ia"] if usar_ia else []),
         ]
         # solo el modelo para Navisworks (FBX) y SolidWorks (3MF); sin vista foto-realista (tardaba mucho)

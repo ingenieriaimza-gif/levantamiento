@@ -113,7 +113,8 @@ final class KeyframeRecorder {
     /// Decide si este cuadro es clave (se movió o giró lo suficiente) y lo guarda.
     /// Se llama en la cola de escaneo. Devuelve true si se guardó.
     @discardableResult
-    func consider(frame: ARFrame, depth: ARDepthData, mask: [Bool]? = nil, dense: Bool = false) -> Bool {
+    func consider(frame: ARFrame, depth: ARDepthData, mask: [Bool]? = nil, dense: Bool = false,
+                  saveLocal: Bool = true) -> Bool {
         guard directory != nil else { return false }
         // dense = cerca de una pieza enfocada: fotos cada 3 cm o 3° (en lugar de 7 cm o 6°)
         let minT = dense ? Float(0.03) : minTranslation
@@ -137,6 +138,14 @@ final class KeyframeRecorder {
         let waited = frame.timestamp - (waitingSince ?? frame.timestamp)
         if sharp < sharpnessRatio * recentBestSharpness && waited < sharpnessWindow { return false }
         waitingSince = nil
+
+        // Con la PC conectada el iPhone no guarda nada: todo se manda a la PC (no se llena ni se satura el teléfono)
+        if !saveLocal {
+            selected += 1
+            lastPose = T
+            lastTime = frame.timestamp
+            return true
+        }
 
         // Foto
         let image = frame.capturedImage

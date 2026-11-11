@@ -266,8 +266,8 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     lo = np.maximum(np.floor(cmin).astype(int) - PAD, 0)
     hi = np.minimum(np.ceil(cmax).astype(int) + PAD, wh[chart_label] - 1)
     # detalle máximo útil: con fotos de 12 MP un parche puede tener mucho más detalle del que se ve;
-    # se limita a LEVANTA_MM_POR_PIXEL (0.4 mm por defecto) para que el modelo no se haga ingobernable
-    mm_px = float(os.environ.get("LEVANTA_MM_POR_PIXEL", "0.4"))
+    # se limita a LEVANTA_MM_POR_PIXEL (0.2 mm por defecto) para que el modelo no se haga ingobernable
+    mm_px = float(os.environ.get("LEVANTA_MM_POR_PIXEL", "0.2"))
     tsc = np.full(nC, float(texture_scale))
     if nC:
         A3 = np.linalg.norm(np.cross(V[F[lab_faces, 1]] - V[F[lab_faces, 0]],

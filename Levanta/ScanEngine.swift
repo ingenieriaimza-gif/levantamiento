@@ -487,7 +487,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         coach.guide(frame: frame, zones: zones, centerDepth: lastCenterDepth)
         var savedKeyframe = false
         if activeRecordRGBD && recorder.isActive, let depth = chosen,
-           recorder.consider(frame: frame, depth: depth, mask: mask, dense: nearFocus) {
+           recorder.consider(frame: frame, depth: depth, mask: mask, dense: nearFocus,
+                             saveLocal: !link.isConnected) {
             savedKeyframe = true
             let n = recorder.selected
             DispatchQueue.main.async { self.keyframeCount = n }
