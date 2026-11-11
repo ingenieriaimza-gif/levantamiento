@@ -49,19 +49,32 @@ def write_fbx(path, parts):
     w("\t}")
     w("}")
     n = len(parts)
+    # Un solo objeto "Escaneo" que agrupa todas las páginas, centrado en el origen (X,Y al centro, piso en Z=0):
+    # en Navisworks se selecciona completo y se puede mover/girar como una sola pieza.
+    allv = np.vstack([p_[1] for p_ in parts]) if parts else np.zeros((1, 3))
+    lo, hi = allv.min(0), allv.max(0)
+    centro = np.array([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]])
+    parts = [(pg, v - centro, f, uv, tex) for pg, v, f, uv, tex in parts]
+    gid_raiz = 999_999
     w("Definitions:  {")
     w("\tVersion: 100")
-    w(f"\tCount: {1 + 5 * n}")
+    w(f"\tCount: {2 + 5 * n}")
     w('\tObjectType: "GlobalSettings" {')
     w("\t\tCount: 1")
     w("\t}")
     for t in ("Model", "Geometry", "Material", "Texture", "Video"):
         w(f'\tObjectType: "{t}" {{')
-        w(f"\t\tCount: {n}")
+        w(f"\t\tCount: {n + 1 if t == 'Model' else n}")
         w("\t}")
     w("}")
     w("Objects:  {")
-    conns = []
+    conns = [f'\tC: "OO",{gid_raiz},0']
+    w(f'\tModel: {gid_raiz}, "Model::Escaneo", "Null" {{')
+    w("\t\tVersion: 232")
+    w("\t\tProperties70:  {")
+    w('\t\t\tP: "Lcl Translation", "Lcl Translation", "", "A",0,0,0')
+    w("\t\t}")
+    w("\t}")
     for k, (pg, verts, faces, uv, tex) in enumerate(parts):
         gid, mid, matid, tid, vid = (1_000_000 + k * 10 + j for j in range(5))
         name = f"pagina_{pg}"
@@ -157,7 +170,7 @@ def write_fbx(path, parts):
         w('\t\tTexture_Alpha_Source: "None"')
         w("\t\tCropping: 0,0,0,0")
         w("\t}")
-        conns += [f'\tC: "OO",{mid},0', f'\tC: "OO",{gid},{mid}', f'\tC: "OO",{matid},{mid}',
+        conns += [f'\tC: "OO",{mid},{gid_raiz}', f'\tC: "OO",{gid},{mid}', f'\tC: "OO",{matid},{mid}',
                   f'\tC: "OP",{tid},{matid}, "DiffuseColor"', f'\tC: "OO",{vid},{tid}']
     w("}")
     w("Connections:  {")
