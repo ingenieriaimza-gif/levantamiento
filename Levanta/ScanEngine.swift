@@ -639,8 +639,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     /// En cada foto clave pide a iOS una foto de máxima resolución (con su propia posición e intrínsecos)
     /// y la manda a la PC, que la usa para la textura. La profundidad y la fusión siguen con los cuadros normales.
     private func requestHighRes(session: ARSession, at time: TimeInterval) {
-        guard Self.highResPhotos, link.isConnected, !hrDisabled,
-              time - hrLastTime >= 0.8, link.backlog <= 4 else { return }
+        guard Self.highResPhotos, link.isConnected,
+              time - hrLastTime >= 0.8, link.backlog <= 16 else { return }
         hrLock.lock()
         if hrBusy { hrLock.unlock(); return }
         hrBusy = true
@@ -652,7 +652,6 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 self.hrLock.lock()
                 self.hrBusy = false
                 self.hrFailures += 1
-                if self.hrFailures >= 6 && self.hrSent == 0 { self.hrDisabled = true }     // este iPhone no puede
                 self.hrLock.unlock()
                 return
             }
