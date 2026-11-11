@@ -559,6 +559,8 @@ def _harmonize_gains(frames, C, labels, second, K, max_pairs=400_000):
 
 # El OBJ no se entrega (Navisworks usa el FBX); se puede pedir con --obj en procesar_rgbd.
 EXPORTAR_OBJ = False
+# El GLB era para "Revisar 3D" en la PC; ya no se entrega (solo FBX para Navisworks y un USDZ ligero para el iPhone)
+HACER_GLB = os.environ.get("LEVANTA_GLB", "0") == "1"
 
 
 def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
@@ -589,14 +591,15 @@ def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
         uv_unique = np.zeros((len(uk), 2))
         uv_unique[inv] = uvs
         faces = inv.reshape(-1, 3)
-        ok_, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])
-        rgb = Image.open(io.BytesIO(enc.tobytes()))          # conserva formato JPEG dentro del GLB
-        rgb.load()
-        mat = trimesh.visual.material.PBRMaterial(baseColorTexture=rgb, metallicFactor=0.0, roughnessFactor=1.0,
-                                                  doubleSided=True)
-        tm = trimesh.Trimesh(vertices=verts, faces=faces,
-                             visual=trimesh.visual.TextureVisuals(uv=uv_unique, material=mat), process=False)
-        scene.add_geometry(tm, geom_name=f"pagina_{pg}")
+        if HACER_GLB:
+            ok_, enc = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+            rgb = Image.open(io.BytesIO(enc.tobytes()))          # conserva formato JPEG dentro del GLB
+            rgb.load()
+            mat = trimesh.visual.material.PBRMaterial(baseColorTexture=rgb, metallicFactor=0.0, roughnessFactor=1.0,
+                                                      doubleSided=True)
+            tm = trimesh.Trimesh(vertices=verts, faces=faces,
+                                 visual=trimesh.visual.TextureVisuals(uv=uv_unique, material=mat), process=False)
+            scene.add_geometry(tm, geom_name=f"pagina_{pg}")
         usd_parts.append((pg, verts, faces, uv_unique))
 
         # OBJ (Z arriba, milímetros): Navisworks lo abre con sus fotos
@@ -618,7 +621,8 @@ def _export(V, F, face_uv, page_of, pages, out_dir, to_z_up):
 
     # GLB y USDZ: no se entregan como archivos, pero son los que usa "Revisar 3D y medir" (PC e iPhone)
     t1 = time.time()
-    scene.export(os.path.join(out_dir, "modelo_texturizado.glb"))
+    if HACER_GLB:
+        scene.export(os.path.join(out_dir, "modelo_texturizado.glb"))
     t2 = time.time()
     try:
         _export_usdz(usd_parts, obj_dir, os.path.join(out_dir, "modelo_texturizado.usdz"))
@@ -644,7 +648,24 @@ def _export_usdz(parts, tex_dir, usdz_path):
     """USDZ para abrir directo en el iPhone (Vista rápida / AR). Metros, Y arriba."""
     from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, UsdUtils, Vt
 
-    usdc = os.path.join(tex_dir, "modelo_texturizado.usdc")
+    # Para el iPhone: las páginas de 4096² pesan ~64 MB cada una ya abiertas en memoria y con decenas de páginas
+    # cierran la app. Se reducen a ~50 millones de píxeles en total (el FBX de Navisworks conserva todo el detalle).
+    import shutil
+    import cv2
+    n_pag = max(1, len(parts))
+    lado = 512
+    while lado < 2048 and (lado * 2) ** 2 * n_pag <= 50e6:
+        lado *= 2
+    ligero = os.path.join(tex_dir, "_usdz_ligero")
+    os.makedirs(ligero, exist_ok=True)
+    for pg, _v, _f, _uv in parts:
+        im = cv2.imread(os.path.join(tex_dir, f"textura_{pg}.jpg"), cv2.IMREAD_COLOR)
+        if im is None:
+            continue
+        if im.shape[1] > lado:
+            im = cv2.resize(im, (lado, lado), interpolation=cv2.INTER_AREA)
+        cv2.imwrite(os.path.join(ligero, f"textura_{pg}.jpg"), im, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    usdc = os.path.join(ligero, "modelo_texturizado.usdc")
     stage = Usd.Stage.CreateNew(usdc)
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y)
     UsdGeom.SetStageMetersPerUnit(stage, 1.0)
@@ -687,4 +708,4 @@ def _export_usdz(parts, tex_dir, usdz_path):
     if os.path.exists(usdz_path):
         os.remove(usdz_path)
     UsdUtils.CreateNewARKitUsdzPackage(usdc, usdz_path)
-    os.remove(usdc)
+    shutil.rmtree(ligero, ignore_errors=True)
