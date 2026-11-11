@@ -183,11 +183,10 @@ struct ReviewView: View {
 
     private func start() {
         engine.measure.onChange = { [weak engine] list in engine?.sendMeasures(list) }
-        guard link.isConnected else { chooseDefault(); return }
-        link.fetchModels { list in
-            models = list
-            chooseDefault()
-        }
+        // Los modelos finales de la PC ya no se abren aquí: eran enormes (millones de triángulos y muchas texturas),
+        // la app se cerraba por memoria al abrirlos, y la PC ya no guarda el USDZ (solo el FBX para Navisworks).
+        models = []
+        chooseDefault()
     }
 
     /// Lo más útil primero: el modelo final si es más nuevo que lo último escaneado; si no, lo en vivo.
