@@ -136,6 +136,9 @@ def pick_folder_dialog(initial):
 
 # ------------------------------------------------------------------ IA (módulo opcional)
 
+# Los modelos con fotos de 12 MP pesan poco en archivo pero ocupan gigas ya abiertos y cierran la app del iPhone
+# ("Revisar 3D"). Ya no se ofrecen al iPhone: el modelo para Navisworks es el que se usa.
+OFRECER_MODELOS_AL_IPHONE = False
 MAX_USDZ_IPHONE = 40 * 1024 * 1024       # más que esto no se ofrece al iPhone (las texturas grandes lo cierran)
 IA_DIR = os.path.join(RAIZ, "ia")
 IA_PAQUETES = os.path.join(IA_DIR, "paquetes")
@@ -391,6 +394,8 @@ class Gestion:
 
     async def tel_modelos(self, request):
         items = []
+        if not OFRECER_MODELOS_AL_IPHONE:
+            return web.json_response({"modelos": items})
         if os.path.isdir(self.root):
             live = self.server.session.dir if self.server.session is not None else None
             for name in sorted(os.listdir(self.root), reverse=True):
@@ -412,6 +417,8 @@ class Gestion:
         return web.json_response({"modelos": items})
 
     async def tel_modelo(self, request):
+        if not OFRECER_MODELOS_AL_IPHONE:
+            raise web.HTTPNotFound(text="Los modelos ya no se abren en el iPhone; usa el archivo de Navisworks en la PC")
         d = self._safe(request.match_info["carpeta"])
         p = os.path.join(d, "resultado", "modelo_texturizado.usdz")
         if not os.path.exists(p):
