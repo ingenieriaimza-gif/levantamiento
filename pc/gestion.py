@@ -356,7 +356,11 @@ class Gestion:
                     with open(os.path.join(d, "frames.jsonl"), encoding="utf-8") as f:
                         frames = sum(1 for line in f if line.strip())
                 except OSError:
-                    pass
+                    try:
+                        with open(os.path.join(d, "cuadros.txt")) as f:       # capturas ya borradas
+                            frames = int(f.read().strip() or 0)
+                    except (OSError, ValueError):
+                        pass
                 live = self.server.session is not None and os.path.normpath(self.server.session.dir) == os.path.normpath(d)
                 processing = (self.server.status.get("procesando") and
                               os.path.normpath(getattr(self.server, "processing_dir", "") or "") == os.path.normpath(d))
@@ -462,6 +466,9 @@ class Gestion:
         d = self._safe(data.get("carpeta", ""))
         if self.server.status.get("procesando"):
             return web.json_response({"ok": False, "mensaje": "Ya se está creando otro modelo; espera a que termine"})
+        if not any("frames.jsonl" in fs for _r, _d, fs in os.walk(d)):
+            return web.json_response({"ok": False, "mensaje": "Las fotos de este escaneo ya se borraron al terminar el modelo; "
+                                                              "para rehacerlo hay que escanear de nuevo."})
         sess = self.server.session
         if sess is not None and os.path.normpath(sess.dir) == os.path.normpath(d):
             if self.server.phone is not None and not data.get("forzar"):

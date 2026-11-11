@@ -500,7 +500,8 @@ class Server:
                 self.status["progreso"] = None
                 await self.send_status(f"No se pudo crear el modelo: {fallo} Detalle en resultado\\error.txt")
             else:
-                self._dejar_solo_navisworks(out)
+                if self._dejar_solo_navisworks(out):
+                    self._borrar_capturas(sdir)
                 self.status["resultados"].append(sdir)
                 self.status["progreso"] = {"carpeta": os.path.basename(sdir), "fraccion": 1.0,
                                            "etapa": "Listo", "restante_s": 0,
@@ -516,7 +517,7 @@ class Server:
         carpeta obj con el FBX y sus texturas. Si el FBX no se creó, no se borra nada."""
         import shutil
         if not os.path.exists(os.path.join(out, "obj", "modelo_navisworks.fbx")):
-            return
+            return False
         obj = os.path.join(out, "obj")
         for fn in os.listdir(obj):
             if not (fn == "modelo_navisworks.fbx" or (fn.startswith("textura_") and fn.endswith(".jpg"))):
@@ -530,6 +531,27 @@ class Server:
             p = os.path.join(out, fn)
             try:
                 shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+            except OSError:
+                pass
+        return True
+
+    @staticmethod
+    def _borrar_capturas(sdir):
+        """Con el FBX ya hecho, borra lo que mandó el iPhone (fotos, profundidad, poses): es lo más pesado.
+        Se conservan las medidas y el resultado. Guarda cuántos cuadros eran para mostrarlo en la lista."""
+        import shutil
+        try:
+            with open(os.path.join(sdir, "frames.jsonl"), encoding="utf-8") as f:
+                n = sum(1 for line in f if line.strip())
+            with open(os.path.join(sdir, "cuadros.txt"), "w") as f:
+                f.write(str(n))
+        except OSError:
+            pass
+        for fn in ("frames", "fotos_hr"):
+            shutil.rmtree(os.path.join(sdir, fn), ignore_errors=True)
+        for fn in ("frames.jsonl", "fotos_hr.jsonl", "meta.json", "zonas.json"):
+            try:
+                os.remove(os.path.join(sdir, fn))
             except OSError:
                 pass
 
