@@ -435,7 +435,8 @@ class Server:
             [py, "-I", "-X", "utf8", os.path.join(TOOLS, "procesar_rgbd.py"), sdir, "--salida", out,
              "--voxel", "0.004", "--dmax", "3.5", "--conf", "2", "--lecturas", "2",
              "--triangulos-textura", "3000000",
-             "--verificacion", os.path.join(sdir, "verificacion.txt")] + (["--escala", str(escala), "1"] if escala else [])
+             "--verificacion", os.path.join(sdir, "verificacion.txt")]
+            + (["--comparar", os.path.join(sdir, "comparacion")] if self.modo_prueba() else []) + (["--escala", str(escala), "1"] if escala else [])
             + (["--ia"] if usar_ia else []),
         ]
         # solo el modelo para Navisworks (FBX) y SolidWorks (3MF); sin vista foto-realista (tardaba mucho)
@@ -503,7 +504,8 @@ class Server:
             else:
                 loop_ = asyncio.get_running_loop()
                 if await loop_.run_in_executor(None, self._dejar_solo_navisworks, out):
-                    await loop_.run_in_executor(None, self._borrar_capturas, sdir)
+                    if not self.modo_prueba():        # en modo de prueba se conservan las fotos para revisar y repetir
+                        await loop_.run_in_executor(None, self._borrar_capturas, sdir)
                 self.status["resultados"].append(sdir)
                 self.status["progreso"] = {"carpeta": os.path.basename(sdir), "fraccion": 1.0,
                                            "etapa": "Listo", "restante_s": 0,
@@ -525,6 +527,11 @@ class Server:
         finally:
             self.status["procesando"] = False
             await self.send_status()
+
+    def modo_prueba(self):
+        """Modo de prueba (lo activa Claude por el conector): no se borran las fotos al terminar el modelo
+        y se guarda la comparación del modelo contra fotos reales."""
+        return os.path.exists(os.path.join(self.root, "modo_prueba.txt"))
 
     @staticmethod
     def _dejar_solo_navisworks(out):

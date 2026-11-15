@@ -71,7 +71,7 @@ def _shelf_pack(sizes, page):
 
 def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
                  page_size=4096, zbuf_scale=2, smooth_iters=20, to_z_up=None, scale=1.0,
-                 harmonize=True, texture_scale=1.0, consume=False):
+                 harmonize=True, texture_scale=1.0, consume=False, comparar=None):
     """
     mesh: TriangleMesh de Open3D en el mundo de ARKit (Y arriba, metros).
     frames: lista de cuadros (dicts con jpg, fx, fy, cx, cy, w, h, T) como en procesar_rgbd.
@@ -400,10 +400,91 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     os.makedirs(out_dir, exist_ok=True)
     _avance(0.75, "Guardando el modelo con fotos")
     _export(V * scale, F, face_uv, page_of, pages, out_dir, to_z_up)
+    if comparar:
+        try:
+            comparar_con_fotos(V, F, face_uv, page_of, pages, comparar[1], comparar[0])
+        except Exception as e:      # noqa: BLE001 — es solo una comprobación
+            _log(f"  (comparación con las fotos omitida: {e})")
     _log(f"  {len(used)} fotos usadas en {nC:,} parches, {n_photo_pages} página(s) de fotos + "
          f"{n_color_pages} de color, {page_size}², {time.time() - t0:.0f} s")
     return {"triangles": nF, "photos_used": int(len(used)), "pages": n_pages,
             "coverage": float((labels >= 0).mean())}
+
+
+def comparar_con_fotos(V, F, face_uv, page_of, pages, fotos, out_dir, n=8, ancho=1280):
+    """Comprobación con fotos reales: se "toma" una foto del modelo terminado desde la posición de n fotos del
+    escaneo (de preferencia, fotos que NO se usaron para pintarlo) y se compara con la foto real.
+    Guarda comp_XX.jpg (modelo | foto real) y comparacion.json con el parecido de cada una."""
+    import json
+    if not fotos:
+        return None
+    os.makedirs(out_dir, exist_ok=True)
+    sc = o3d.t.geometry.RaycastingScene()
+    sc.add_triangles(o3d.core.Tensor(V.astype(np.float32)), o3d.core.Tensor(F.astype(np.uint32)))
+    sel = [fotos[i] for i in np.unique(np.linspace(0, len(fotos) - 1, min(n, len(fotos))).round().astype(int))]
+    filas = []
+    for q, fr in enumerate(sel):
+        foto = cv2.imread(fr["jpg"], cv2.IMREAD_COLOR)
+        if foto is None:
+            continue
+        s_ = ancho / float(fr["w"])
+        w, h = ancho, int(round(float(fr["h"]) * s_))
+        foto = cv2.resize(foto, (w, h), interpolation=cv2.INTER_AREA)
+        fx, fy = fr["fx"] * s_, fr["fy"] * s_
+        cx, cy = (fr["cx"] + 0.5) * s_ - 0.5, (fr["cy"] + 0.5) * s_ - 0.5
+        Tc = np.array(fr["T"], float).reshape(4, 4).T @ ARKIT_TO_CV
+        uu, vv = np.meshgrid(np.arange(w), np.arange(h))
+        d = np.stack([(uu - cx) / fx, (vv - cy) / fy, np.ones_like(uu, float)], -1).reshape(-1, 3) @ Tc[:3, :3].T
+        rays = np.concatenate([np.broadcast_to(Tc[:3, 3], d.shape), d], 1).astype(np.float32)
+        hit = sc.cast_rays(o3d.core.Tensor(rays))
+        ids = hit["primitive_ids"].numpy()
+        ok = ids != sc.INVALID_ID
+        if ok.mean() < 0.05:
+            continue
+        b = hit["primitive_uvs"].numpy()[ok]
+        fu = face_uv[ids[ok]]
+        uv = fu[:, 0] * (1 - b[:, :1] - b[:, 1:]) + fu[:, 1] * b[:, :1] + fu[:, 2] * b[:, 1:]
+        ren = np.zeros((h * w, 3), np.float32)
+        idx, pg = np.nonzero(ok)[0], page_of[ids[ok]]
+        for k in np.unique(pg):
+            m = pg == k
+            T = pages[k]
+            H, W = T.shape[:2]
+            mx = np.clip(uv[m, 0] * W - 0.5, 0, W - 1.001)
+            my = np.clip((1 - uv[m, 1]) * H - 0.5, 0, H - 1.001)
+            x0, y0 = mx.astype(int), my.astype(int)
+            ax, ay = (mx - x0)[:, None], (my - y0)[:, None]
+            ren[idx[m]] = (T[y0, x0] * (1 - ax) + T[y0, x0 + 1] * ax) * (1 - ay) \
+                + (T[y0 + 1, x0] * (1 - ax) + T[y0 + 1, x0 + 1] * ax) * ay
+        ren = ren.reshape(h, w, 3)
+        m2 = cv2.erode(ok.reshape(h, w).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        if m2.sum() < 1000:
+            continue
+        a, f_ = ren[m2], foto.astype(np.float32)[m2]
+        gan = (a * f_).sum(0) / np.maximum((a * a).sum(0), 1e-6)        # misma exposición antes de comparar
+        dif = np.abs(a * gan - f_)
+        lap = lambda im: np.abs(cv2.Laplacian(cv2.cvtColor(np.clip(im, 0, 255).astype(np.uint8), cv2.COLOR_BGR2GRAY),
+                                              cv2.CV_32F))[m2].mean()
+        filas.append({"foto": os.path.basename(fr["jpg"]), "ancho_foto": int(fr["w"]),
+                      "error_color": round(float(dif.mean()), 2),
+                      "psnr_db": round(float(10 * np.log10(255.0 ** 2 / max(float((dif ** 2).mean()), 1e-6))), 2),
+                      "nitidez": round(float(lap(ren) / max(lap(foto), 1e-6)), 3),
+                      "cubierto": round(float(ok.mean()), 3)})
+        cv2.imwrite(os.path.join(out_dir, f"comp_{q:02d}.jpg"),
+                    np.hstack([np.clip(ren, 0, 255).astype(np.uint8), foto]), [cv2.IMWRITE_JPEG_QUALITY, 88])
+    if not filas:
+        return None
+    res = {"error_color": round(float(np.mean([f["error_color"] for f in filas])), 2),
+           "psnr_db": round(float(np.mean([f["psnr_db"] for f in filas])), 2),
+           "nitidez": round(float(np.mean([f["nitidez"] for f in filas])), 3),
+           "cubierto": round(float(np.mean([f["cubierto"] for f in filas])), 3), "fotos": filas,
+           "nota": "modelo visto desde la posición de fotos reales; error_color sobre 255 (menos es mejor), "
+                   "nitidez 1.0 = igual de nítido que la foto, cubierto = parte de la foto que el modelo llena"}
+    with open(os.path.join(out_dir, "comparacion.json"), "w", encoding="utf-8") as f:
+        json.dump(res, f, ensure_ascii=False, indent=1)
+    _log(f"  comparación con {len(filas)} fotos reales: error de color {res['error_color']:.1f}/255, "
+         f"nitidez {res['nitidez']:.2f}, cubre {res['cubierto'] * 100:.0f} %")
+    return res
 
 
 def _rellenar_huecos(img, mask):

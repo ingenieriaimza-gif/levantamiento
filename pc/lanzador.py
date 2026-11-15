@@ -123,6 +123,49 @@ def apply_pending():
         print("Actualización:", res)
 
 
+def registrar_en_claude():
+    """Deja el conector de Levantamiento 3D (pc/mcp_levanta.py) dado de alta en la app de Claude para escritorio,
+    si está instalada en esta PC. Así Claude puede revisar los escaneos reales. No cambia nada más de su configuración."""
+    aqui = os.path.dirname(os.path.abspath(__file__))
+    py = sys.executable
+    if os.path.basename(py).lower() == "pythonw.exe":
+        py = os.path.join(os.path.dirname(py), "python.exe")
+    entrada = {"command": py, "args": ["-I", "-X", "utf8", os.path.join(aqui, "mcp_levanta.py")]}
+    carpetas = []
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        carpetas.append(os.path.join(appdata, "Claude"))
+    local = os.environ.get("LOCALAPPDATA")
+    if local and os.path.isdir(os.path.join(local, "Packages")):
+        for n in os.listdir(os.path.join(local, "Packages")):
+            if n.lower().startswith("claude"):
+                carpetas.append(os.path.join(local, "Packages", n, "LocalCache", "Roaming", "Claude"))
+    if sys.platform == "darwin":
+        carpetas.append(os.path.expanduser("~/Library/Application Support/Claude"))
+    for c in carpetas:
+        if not os.path.isdir(c):
+            continue
+        cfg = os.path.join(c, "claude_desktop_config.json")
+        try:
+            data = {}
+            if os.path.exists(cfg):
+                with open(cfg, encoding="utf-8") as f:
+                    data = json.load(f)
+            if not isinstance(data, dict):
+                continue
+            srv = data.setdefault("mcpServers", {})
+            if srv.get("levantamiento3d") == entrada:
+                continue
+            srv["levantamiento3d"] = entrada
+            if os.path.exists(cfg) and not os.path.exists(cfg + ".antes_de_levantamiento3d"):
+                shutil.copyfile(cfg, cfg + ".antes_de_levantamiento3d")
+            with open(cfg, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            print("Conector de Claude registrado en", cfg)
+        except (OSError, ValueError) as e:
+            print("No se pudo registrar el conector de Claude:", e)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--esperar", action="store_true", help="esperar a que se cierre la versión anterior")
@@ -149,6 +192,10 @@ def main():
     print(f"\n--- inicio {time.strftime('%Y-%m-%d %H:%M:%S')} ---")
 
     apply_pending()
+    try:
+        registrar_en_claude()
+    except Exception as e:      # noqa: BLE001 — nunca debe impedir abrir el programa
+        print("Conector de Claude:", e)
 
     if not args.sin_ventana:
         def wait_and_open():

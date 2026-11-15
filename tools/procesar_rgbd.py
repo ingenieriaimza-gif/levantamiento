@@ -693,6 +693,8 @@ def main():
     ap.add_argument("--escala-textura", type=float, default=1.0,
                     help="reduce las fotos en la textura (p. ej. 0.5 para un modelo ligero para el iPhone)")
     ap.add_argument("--sin-alinear", action="store_true", help="no corregir la deriva del iPhone")
+    ap.add_argument("--comparar", default=None,
+                    help="carpeta donde guardar la comparación del modelo contra fotos reales del escaneo (pruebas)")
     ap.add_argument("--verificacion", default=None,
                     help="archivo donde guardar la verificación de exactitud (def.: verificacion.txt en la salida)")
     ap.add_argument("--todos-los-archivos", action="store_true",
@@ -861,7 +863,12 @@ def main():
             holder, hibrida = [tex_mesh], tex_mesh is not mesh
             del tex_mesh
             gc.collect()
-            tex_info = texture_mesh(holder.pop(), kf, args.salida, dmax=tex_dmax, consume=hibrida,
+            comparar = None
+            if args.comparar:
+                # fotos que no se usan para pintar (cuadros que no son clave); si no hay, las fotos clave normales
+                resto = [f for f in frames if not f.get("kf", True)]
+                comparar = (args.comparar, resto if len(resto) >= 8 else [f for f in kf if int(f.get("w", 0)) < 3000] or kf)
+            tex_info = texture_mesh(holder.pop(), kf, args.salida, dmax=tex_dmax, consume=hibrida, comparar=comparar,
                                     target_triangles=target_tex,
                                     page_size=args.pagina_textura,
                                     texture_scale=args.escala_textura,
