@@ -24,6 +24,13 @@ def _log(msg):
     print(msg, flush=True)
 
 
+# Ajustes del texturizado (se pueden cambiar con variables de entorno para pruebas)
+MARGEN_ORILLA = int(os.environ.get("LEVANTA_MARGEN_ORILLA", "2"))        # celdas del z-buffer alrededor de un salto
+PESO_ORILLA = float(os.environ.get("LEVANTA_PESO_ORILLA", "0.25"))
+ESTRICTO = os.environ.get("LEVANTA_VISIBLE_ESTRICTO", "1") == "1"
+LAMBDA_VECINOS = float(os.environ.get("LEVANTA_LAMBDA_VECINOS", "0.3"))
+RAZON_MIN = float(os.environ.get("LEVANTA_RAZON_MIN", "0.3"))
+
 # avance (0–1) de esta etapa; procesar_rgbd lo conecta a la barra del programa
 AVANCE = None
 
@@ -93,10 +100,9 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(m))
 
     K = len(frames)
-    best_score = np.zeros(nF)
-    best_frame = np.full(nF, -1, np.int32)
-    second_score = np.zeros(nF)
-    second_frame = np.full(nF, -1, np.int32)
+    NCAND = int(os.environ.get("LEVANTA_NCAND", "6"))       # se guardan las mejores fotos de cada triángulo
+    cand_score = np.zeros((nF, NCAND), np.float32)
+    cand_frame = np.full((nF, NCAND), -1, np.int32)
     proj_cache = {}
 
     _avance(0.38, "Revisando la nitidez de las fotos")
@@ -133,6 +139,13 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         dw_ = dcam @ R.T
         rays = np.concatenate([np.broadcast_to(t, dw_.shape), dw_], 1).astype(np.float32)
         zbuf = scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy().reshape(zh, zw)
+        # orillas de oclusión (saltos de profundidad): ahí un error de milímetros en la posición de la foto
+        # pinta el tubo sobre la pared de atrás, o la pared sobre el tubo. Se evita usar esa franja.
+        zf = np.where(np.isfinite(zbuf), zbuf, 50.0).astype(np.float32)
+        k3 = np.ones((3, 3), np.uint8)
+        zmin = cv2.erode(zf, k3)
+        salto = (cv2.dilate(zf, k3) - zmin) > np.maximum(0.03, 0.03 * zmin)
+        orilla = cv2.dilate(salto.astype(np.uint8), np.ones((2 * MARGEN_ORILLA + 1,) * 2, np.uint8)) > 0
 
         # proyección de centroides
         Pc = (C - t) @ R
@@ -163,9 +176,13 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         qv = np.clip(np.nan_to_num((uv_v + 0.5) / zbuf_scale - 0.5).round().astype(int), 0, zh - 1)
         vz = zbuf[qv, qu]
         vvis = (np.abs(vz - zvv) < np.maximum(0.012, 0.01 * np.abs(zvv))).reshape(-1, 3).all(1)
+        en_orilla = orilla[qv, qu].reshape(-1, 3).any(1)
         inside = inside.reshape(-1, 3).all(1)
+        if ESTRICTO:
+            inside &= vvis                      # un vértice tapado = esta foto no ve bien el triángulo
         idx = idx[inside]
         vvis = vvis[inside]
+        en_orilla = en_orilla[inside]
         if len(idx) == 0:
             return None
         view = C[idx] - t
@@ -176,7 +193,8 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         score = (cosang ** 2) / (dist ** 1.5) * sharp_w[k] * np.clip(edge, 0.25, 1.0) * (w / 1920.0) ** 0.7
         # si algún vértice queda tapado, la foto sólo sirve como último recurso
         score = np.where(vvis, score, score * 0.02)
-        return idx, score
+        score = np.where(en_orilla, score * PESO_ORILLA, score)
+        return idx, score.astype(np.float32)
 
     from concurrent.futures import ThreadPoolExecutor
     from paralelo import nucleos
@@ -186,44 +204,45 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
             if res is None:
                 continue
             idx, score = res
-            better = score > best_score[idx]
-            # el mejor anterior pasa a segundo
-            ii = idx[better]
-            second_score[ii] = best_score[ii]
-            second_frame[ii] = best_frame[ii]
-            best_score[ii] = score[better]
-            best_frame[ii] = k
-            jj = idx[~better]
-            sec = score[~better] > second_score[jj]
-            second_score[jj[sec]] = score[~better][sec]
-            second_frame[jj[sec]] = k
+            # entra si supera a la peor de las guardadas para ese triángulo
+            peor = cand_score[idx].argmin(1)
+            entra = score > cand_score[idx, peor]
+            cand_score[idx[entra], peor[entra]] = score[entra]
+            cand_frame[idx[entra], peor[entra]] = k
             if k % 5 == 0:
                 _avance(0.40 + 0.22 * (k + 1) / K, f"Eligiendo la mejor foto para cada zona ({k + 1} de {K})")
             if (k + 1) % 50 == 0:
                 _log(f"  {k + 1}/{K} fotos evaluadas ({time.time() - t0:.0f} s)")
 
+    o = np.argsort(-cand_score, axis=1)
+    cand_score = np.take_along_axis(cand_score, o, 1)
+    cand_frame = np.take_along_axis(cand_frame, o, 1)
+    best_score, best_frame = cand_score[:, 0].astype(np.float64), cand_frame[:, 0].copy()
+    second_frame = cand_frame[:, 1].copy()
     labels = best_frame.copy()
     _log(f"  con foto: {(labels >= 0).mean() * 100:.1f} % de los triángulos")
 
-    # suavizado de etiquetas: cambiar a la etiqueta mayoritaria de los vecinos si esa foto también
-    # ve bien el triángulo (es su mejor o segunda mejor opción), para hacer parches grandes
+    # Zonas grandes con una sola foto: cada triángulo escoge, entre sus mejores fotos, la que también usan
+    # sus vecinos, siempre que esa foto lo vea casi igual de bien. Menos uniones = menos costuras y líneas
+    # que no se quiebran al pasar de una foto a otra.
     _avance(0.62, "Uniendo zonas con la misma foto")
     adj = _face_adjacency(F)
-    for _ in range(smooth_iters):
-        a, b = adj[:, 0], adj[:, 1]
-        changed = 0
-        for src, dst in ((a, b), (b, a)):
-            nb_label = labels[src]
-            cand = (second_frame[dst] == nb_label) & (labels[dst] != nb_label) & (nb_label >= 0) \
-                & (second_score[dst] > 0.6 * best_score[dst])
-            # contar votos por (cara, etiqueta)
-            if cand.any():
-                d = dst[cand]
-                cnt = np.bincount(d, minlength=nF)
-                flip = cnt[d] >= 2
-                labels[d[flip]] = nb_label[cand][flip]
-                changed += int(flip.sum())
-        if changed == 0:
+    a, b = adj[:, 0], adj[:, 1]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        razon = np.where(cand_frame >= 0, cand_score / np.maximum(cand_score[:, :1], 1e-20), -np.inf)
+    razon = np.where(razon < RAZON_MIN, -np.inf, razon)          # nunca una foto que lo vea mucho peor
+    razon[:, 0] = np.where(cand_frame[:, 0] >= 0, 1.0, -np.inf)
+    rng_ = np.random.default_rng(0)
+    for it_ in range(int(os.environ.get("LEVANTA_VUELTAS", "40"))):
+        valor = razon.copy()
+        for c in range(NCAND):
+            for src, dst in ((a, b), (b, a)):
+                hit = labels[src] == cand_frame[dst, c]
+                valor[:, c] += LAMBDA_VECINOS * np.bincount(dst[hit], minlength=nF)
+        nuevo = cand_frame[np.arange(nF), valor.argmax(1)]
+        cambia = (nuevo != labels) & (labels >= 0) & (rng_.random(nF) < 0.6)
+        labels[cambia] = nuevo[cambia]
+        if cambia.sum() < nF * 2e-5:
             break
 
     # --- igualación de exposición/balance entre fotos

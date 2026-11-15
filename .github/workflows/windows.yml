@@ -67,7 +67,7 @@ jobs:
       - name: Prueba de importación con el Python embebido
         shell: pwsh
         run: |
-          dist\app\python\python.exe -I -c "import open3d, numpy, cv2, aiohttp, zeroconf, pye57, trimesh, scipy, PIL; from pxr import Usd, UsdUtils; print('open3d', open3d.__version__, 'numpy', numpy.__version__)"
+          dist\app\python\python.exe -I -c "import open3d, numpy, cv2, aiohttp, zeroconf, pye57, trimesh, scipy, PIL; from pxr import Usd, UsdUtils; cv2.SIFT_create(); print('open3d', open3d.__version__, 'numpy', numpy.__version__)"
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Prueba de punta a punta (iPhone simulado)
@@ -94,6 +94,9 @@ jobs:
           foreach ($f in "modelo_texturizado.usdz", "modelo_texturizado.glb", "reporte.txt", "poses_corregidas.json", "modelo_solidworks.3mf", "nube_fusionada.e57", "malla_solidworks.stl", "obj\modelo_texturizado.obj") {
             if (Test-Path "$res\$f") { Write-Error "Sobra $f (ya no se debe crear)" }
           }
+          # la verificación de exactitud queda junto al escaneo (no dentro de resultado)
+          if (-not (Test-Path "prueba\RGBD_prueba_simulada\verificacion.txt")) { Write-Error "Falta verificacion.txt" }
+          Get-Content "prueba\RGBD_prueba_simulada\verificacion.txt"
           Stop-Process -Id $srv.Id -Force
           if (-not $ok) { Get-Content srv.err -Tail 40; exit 1 }
 

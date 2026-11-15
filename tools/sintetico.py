@@ -99,11 +99,38 @@ def pixel_rays(T, w, h):
     return np.concatenate([origins, dirs], 1).astype(np.float32)
 
 
+def render_color(scene, tri_colors, T, w, h, filas=512):
+    """Foto de la escena desde la posición T a w×h (RGB uint8), con sombreado y detalle fino pegado a la superficie."""
+    out = np.zeros((h, w, 3), np.uint8)
+    todos = pixel_rays(T, w, h).reshape(h, w, 6)
+    for y0 in range(0, h, filas):
+        rays = np.ascontiguousarray(todos[y0:y0 + filas].reshape(-1, 6))
+        hit = scene.cast_rays(o3d.core.Tensor(rays))
+        ids = hit["primitive_ids"].numpy()
+        ok = ids != scene.INVALID_ID
+        col = np.zeros((len(rays), 3))
+        col[ok] = tri_colors[ids[ok]]
+        nrm = hit["primitive_normals"].numpy()
+        shade = 0.55 + 0.45 * np.abs(nrm @ np.array([0.3, 0.9, 0.3]) / np.linalg.norm([0.3, 0.9, 0.3]))
+        col = col * shade[:, None]
+        # detalle fino ligado a la superficie: cuadrícula de 2 cm y líneas de 5 mm cada 10 cm
+        th = hit["t_hit"].numpy()
+        pw = rays[:, :3] + rays[:, 3:] * np.where(np.isfinite(th), th, 0)[:, None]
+        chk = (np.floor(pw[:, 0] / 0.02) + np.floor(pw[:, 1] / 0.02) + np.floor(pw[:, 2] / 0.02)) % 2
+        lines_ = (np.abs(((pw + 0.05) % 0.10) - 0.05) < 0.0025).any(1)
+        tex = 0.82 + 0.18 * chk
+        tex = np.where(lines_, 0.35, tex)
+        out[y0:y0 + filas] = (np.clip(col * tex[:, None], 0, 1) * 255).astype(np.uint8).reshape(-1, w, 3)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--salida", default="paquete_sint")
     ap.add_argument("--cuadros", type=int, default=120)
     ap.add_argument("--semilla", type=int, default=7)
+    ap.add_argument("--fotos-hr", type=int, default=0,
+                    help="además, una foto de 12 MP (4032×3024) cada N cuadros, como las que manda el iPhone")
     ap.add_argument("--pieza", type=int, default=0,
                     help="además, N tomas de cerca (0.45 m) alrededor del bajante de 1.5\" marcado como pieza")
     args = ap.parse_args()
@@ -138,28 +165,30 @@ def main():
             json.dump({"zonas": [{"id": "p1", "nombre": "Bajante 1.5in", "centro": [0.9, 0.6, 0.25],
                                   "medio": [0.07, 0.3, 0.07]}]}, f)
     n = len(poses)
+    rng_hr = np.random.default_rng(args.semilla + 1000)
+    hr_lines = []
     for i, T_true in enumerate(poses):
 
         # imagen de color
-        rays = pixel_rays(T_true, IMG_W, IMG_H)
-        hit = scene.cast_rays(o3d.core.Tensor(rays))
-        ids = hit["primitive_ids"].numpy()
-        ok = ids != scene.INVALID_ID
-        col = np.zeros((IMG_H * IMG_W, 3))
-        col[ok] = tri_colors[ids[ok]]
-        nrm = hit["primitive_normals"].numpy()
-        shade = 0.55 + 0.45 * np.abs(nrm @ np.array([0.3, 0.9, 0.3]) / np.linalg.norm([0.3, 0.9, 0.3]))
-        col = col * shade[:, None]
-        # detalle fino ligado a la superficie: cuadrícula de 2 cm y líneas de 5 mm cada 10 cm
-        th = hit["t_hit"].numpy()
-        pw = rays[:, :3] + rays[:, 3:] * np.where(np.isfinite(th), th, 0)[:, None]
-        chk = (np.floor(pw[:, 0] / 0.02) + np.floor(pw[:, 1] / 0.02) + np.floor(pw[:, 2] / 0.02)) % 2
-        lines_ = (np.abs(((pw + 0.05) % 0.10) - 0.05) < 0.0025).any(1)
-        tex = 0.82 + 0.18 * chk
-        tex = np.where(lines_, 0.35, tex)
-        img = (np.clip(col * tex[:, None], 0, 1) * 255).astype(np.uint8).reshape(IMG_H, IMG_W, 3)
+        img = render_color(scene, tri_colors, T_true, IMG_W, IMG_H)
         cv2.imwrite(os.path.join(args.salida, "frames", f"{i:06d}.jpg"),
                     cv2.cvtColor(img, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 85])
+
+        # foto de 12 MP (como captureHighResolutionFrame): su propia posición medida y exposición algo distinta
+        if args.fotos_hr and i % args.fotos_hr == 0:
+            os.makedirs(os.path.join(args.salida, "fotos_hr"), exist_ok=True)
+            hw, hh = 4032, 3024
+            big = render_color(scene, tri_colors, T_true, hw, hh).astype(np.float32)
+            big = np.clip(big * rng_hr.uniform(0.85, 1.15), 0, 255).astype(np.uint8)
+            cv2.imwrite(os.path.join(args.salida, "fotos_hr", f"{len(hr_lines):06d}.jpg"),
+                        cv2.cvtColor(big, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 93])
+            Th = T_true.copy()
+            Th[:3, 3] += rng_hr.normal(0, 0.001, 3)
+            Th[:3, :3] = o3d.geometry.get_rotation_matrix_from_xyz(rng_hr.normal(0, math.radians(0.05), 3)) @ Th[:3, :3]
+            sh = hw / FULL_W
+            hr_lines.append(json.dumps({"i": len(hr_lines), "t": i * 0.3, "fx": FX * sh, "fy": FY * sh,
+                                        "cx": (CX + 0.5) * sh - 0.5, "cy": (CY + 0.5) * sh - 0.5,
+                                        "w": hw, "h": hh, "T": Th.T.reshape(-1).tolist()}))
 
         # profundidad LiDAR (z-depth porque la componente z del rayo en cámara es -1)
         rays_d = pixel_rays(T_true, DEPTH_W, DEPTH_H)
@@ -196,6 +225,9 @@ def main():
 
     with open(os.path.join(args.salida, "frames.jsonl"), "w") as f:
         f.write("\n".join(lines) + "\n")
+    if hr_lines:
+        with open(os.path.join(args.salida, "fotos_hr.jsonl"), "w") as f:
+            f.write("\n".join(hr_lines) + "\n")
     meta = {"format": "levanta-rgbd", "version": 1, "frames": n,
             "imageWidth": IMG_W, "imageHeight": IMG_H,
             "depthWidth": DEPTH_W, "depthHeight": DEPTH_H, "depthUnits": "mm",

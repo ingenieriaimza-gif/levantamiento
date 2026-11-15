@@ -211,6 +211,121 @@ def corregir_fotos_hr(fotos, frames, T_antes):
     return n
 
 
+def cargar_medidas(dirs):
+    """Medidas hechas en el iPhone durante el escaneo (puntos a y b en el mundo de ARKit, metros)."""
+    out = []
+    for d in dirs:
+        for base in (d, os.path.dirname(os.path.abspath(d))):
+            p = os.path.join(base, "medidas_iphone.json")
+            if os.path.exists(p):
+                try:
+                    with open(p, encoding="utf-8") as f:
+                        out += [m for m in json.load(f).get("medidas", []) if "a" in m and "b" in m]
+                except (OSError, ValueError):
+                    pass
+                break
+    vistos, unicas = set(), []
+    for m in out:
+        k = m.get("id") or (tuple(m["a"]), tuple(m["b"]))
+        if k not in vistos:
+            vistos.add(k)
+            unicas.append(m)
+    return unicas
+
+
+def verificar_exactitud(mesh, meta, frames, medidas, scale=1.0, max_cuadros=80):
+    """Comprueba el modelo que se entrega contra lo que midió el iPhone:
+      · qué tan pegado queda a las lecturas de alta confianza del LiDAR (mediana y 90 %), y
+      · cada medida hecha en el iPhone contra la misma medida tomada sobre el modelo.
+    mesh: malla final en el mundo de ARKit (metros, antes de girarla). Devuelve un dict con el resumen."""
+    if not len(mesh.triangles):
+        return None
+    scene = o3d.t.geometry.RaycastingScene()
+    scene.add_triangles(o3d.t.geometry.TriangleMesh.from_legacy(mesh))
+    dw, dh = int(meta["depthWidth"]), int(meta["depthHeight"])
+    paso = max(1, len(frames) // max_cuadros)
+    uu, vv = np.meshgrid(np.arange(0, dw, 2), np.arange(0, dh, 2))
+    dist, signo = [], []
+    for fr in frames[::paso]:
+        try:
+            depth = np.fromfile(fr["depth"], dtype="<u2")
+            conf = np.fromfile(fr["conf"], dtype=np.uint8) if os.path.exists(fr["conf"]) else None
+        except OSError:
+            continue
+        if depth.size != dw * dh:
+            continue
+        depth = depth.reshape(dh, dw)
+        z = depth[vv, uu].astype(np.float64) / 1000.0
+        ok = (z > 0.2) & (z < 2.0)
+        if conf is not None and conf.size == dw * dh:
+            ok &= conf.reshape(dh, dw)[vv, uu] >= 2
+        if ok.sum() < 50:
+            continue
+        sx, sy = dw / float(fr.get("w", dw)), dh / float(fr.get("h", dh))
+        fx, fy = fr["fx"] * sx, fr["fy"] * sy
+        cx = (fr["cx"] + 0.5) * sx - 0.5 + PIXEL_OFFSET
+        cy = (fr["cy"] + 0.5) * sy - 0.5 + PIXEL_OFFSET
+        z = z[ok]
+        pc = np.stack([(uu[ok] - cx) * z / fx, (vv[ok] - cy) * z / fy, z, np.ones_like(z)], 1)
+        pw = (pc @ (pose_matrix(fr) @ ARKIT_TO_CV).T)[:, :3]
+        d = scene.compute_distance(o3d.core.Tensor(pw.astype(np.float32))).numpy()
+        cerca = d < 0.03                   # más lejos = cosas que no están en el modelo (personas, ruido)
+        dist.append(d[cerca])
+        # con signo, a lo largo del rayo: + el modelo quedó más lejos que la lectura, − más cerca
+        cam = (pose_matrix(fr) @ ARKIT_TO_CV)[:3, 3]
+        dr = pw[cerca] - cam
+        largo = np.linalg.norm(dr, axis=1)
+        rays = np.concatenate([np.broadcast_to(cam, dr.shape), dr / largo[:, None]], 1).astype(np.float32)
+        th = scene.cast_rays(o3d.core.Tensor(rays))["t_hit"].numpy()
+        s_ = th - largo
+        signo.append(s_[np.isfinite(s_) & (np.abs(s_) < 0.03)])
+    res = {"medidas": []}
+    if dist:
+        d = np.concatenate(dist) * 1000.0 * scale
+        if len(d) > 500:
+            res["ajuste_mediana_mm"] = round(float(np.median(d)), 2)
+            res["ajuste_p90_mm"] = round(float(np.percentile(d, 90)), 2)
+            res["lecturas"] = int(len(d))
+            if signo:
+                res["sesgo_mm"] = round(float(np.median(np.concatenate(signo))) * 1000.0 * scale, 2)
+    for m in medidas:
+        a, b = np.array(m["a"], float), np.array(m["b"], float)
+        q = scene.compute_closest_points(o3d.core.Tensor(np.stack([a, b]).astype(np.float32)))["points"].numpy()
+        da, db = np.linalg.norm(q[0] - a), np.linalg.norm(q[1] - b)
+        item = {"nombre": m.get("nombre") or m.get("id") or "medida",
+                "iphone_mm": round(float(np.linalg.norm(a - b)) * 1000.0 * scale, 1)}
+        if max(da, db) <= 0.03:
+            item["modelo_mm"] = round(float(np.linalg.norm(q[0] - q[1])) * 1000.0 * scale, 1)
+            item["diferencia_mm"] = round(item["modelo_mm"] - item["iphone_mm"], 1)
+        res["medidas"].append(item)
+    return res
+
+
+def texto_verificacion(v):
+    """El resumen de la verificación en renglones para leer."""
+    r = ["Verificación de exactitud del modelo"]
+    if "ajuste_mediana_mm" in v:
+        if "sesgo_mm" in v:
+            r.append(f"Desviación sistemática del modelo respecto al LiDAR: {v['sesgo_mm']:+.1f} mm "
+                     "(lo ideal es 0; + = el modelo quedó más lejos que lo medido, − = más cerca).")
+        r.append(f"Dispersión de las lecturas alrededor del modelo ({v['lecturas']:,} lecturas de alta confianza): "
+                 f"la mitad a menos de {v['ajuste_mediana_mm']:.1f} mm y el 90 % a menos de {v['ajuste_p90_mm']:.1f} mm "
+                 "(es el ruido de cada lectura del LiDAR; el modelo promedia muchas, por eso es más exacto que una sola).")
+    con = [m for m in v["medidas"] if "diferencia_mm" in m]
+    for m in v["medidas"]:
+        if "diferencia_mm" in m:
+            r.append(f"  {m['nombre']}: iPhone {m['iphone_mm']:.1f} mm · modelo {m['modelo_mm']:.1f} mm · "
+                     f"diferencia {m['diferencia_mm']:+.1f} mm")
+        else:
+            r.append(f"  {m['nombre']}: iPhone {m['iphone_mm']:.1f} mm · en el modelo no hay superficie en ese punto")
+    if con:
+        peor = max(abs(m["diferencia_mm"]) for m in con)
+        r.append(f"Medidas del iPhone comprobadas: {len(con)}; la mayor diferencia es de {peor:.1f} mm.")
+    elif not v["medidas"]:
+        r.append("No se tomaron medidas en el iPhone durante este escaneo (con medidas, aquí se comparan una por una).")
+    return r
+
+
 def pose_matrix(fr):
     T = np.array(fr["T"], dtype=float).reshape(4, 4).T   # viene por columnas
     return T
@@ -578,6 +693,8 @@ def main():
     ap.add_argument("--escala-textura", type=float, default=1.0,
                     help="reduce las fotos en la textura (p. ej. 0.5 para un modelo ligero para el iPhone)")
     ap.add_argument("--sin-alinear", action="store_true", help="no corregir la deriva del iPhone")
+    ap.add_argument("--verificacion", default=None,
+                    help="archivo donde guardar la verificación de exactitud (def.: verificacion.txt en la salida)")
     ap.add_argument("--todos-los-archivos", action="store_true",
                     help="además de FBX y 3MF: nube PLY/E57, malla PLY, STL y OBJ (tarda más)")
     args = ap.parse_args()
@@ -655,6 +772,7 @@ def main():
 
 
         tex_info = None
+        verif = None
         if not args.sin_textura:
             import texturizar
             from paralelo import simplificar
@@ -665,6 +783,13 @@ def main():
             if fotos_hr:
                 n_hr = corregir_fotos_hr(fotos_hr, frames, T_antes)
                 log(f"  {n_hr} fotos de máxima resolución con la deriva corregida")
+                if os.environ.get("LEVANTA_AFINAR_FOTOS", "1") != "0":
+                    try:
+                        from afinar_fotos import afinar_fotos_hr
+                        avance("fotos", 0, "Colocando las fotos de 12 MP sobre el modelo")
+                        afinar_fotos_hr(fotos_hr, frames, mesh, log=log)
+                    except Exception as e:      # noqa: BLE001 — si falla, las fotos se usan como llegaron
+                        log(f"  (ajuste fino de las fotos omitido: {e})")
                 kf = kf + fotos_hr        # el texturizador prefiere las de más resolución
             # Modelo con fotos "completo": se vuelve a unir todo aceptando también lecturas de confianza
             # media, ángulos más inclinados y hasta 5 m. Cubre piso, objetos oscuros y lo lejano que la
@@ -723,6 +848,16 @@ def main():
                 phi = rumbo_de_paredes(tex_mesh)       # con la malla final que se entrega
                 A_Z = Y_UP_TO_Z_UP @ giro_vertical(phi)        # paredes paralelas a los ejes X e Y
                 log(f"Escuadrado: el escaneo estaba girado {np.degrees(phi):.2f}° respecto a sus paredes; se endereza")
+            try:
+                verif = verificar_exactitud(tex_mesh, meta, frames, cargar_medidas(dirs), scale)
+            except Exception as e:      # noqa: BLE001 — la verificación nunca debe impedir entregar el modelo
+                log(f"  (verificación omitida: {e})")
+            volcar = os.environ.get("LEVANTA_VOLCAR")       # para pruebas: guarda la malla y las fotos que entran al texturizado
+            if volcar:
+                import pickle
+                o3d.io.write_triangle_mesh(volcar + ".ply", tex_mesh)
+                with open(volcar + ".pkl", "wb") as f:
+                    pickle.dump({"kf": kf, "dmax": tex_dmax, "target": target_tex}, f)
             holder, hibrida = [tex_mesh], tex_mesh is not mesh
             del tex_mesh
             gc.collect()
@@ -731,6 +866,18 @@ def main():
                                     page_size=args.pagina_textura,
                                     texture_scale=args.escala_textura,
                                     to_z_up=A_Z, scale=scale)
+
+        if verif:
+            renglones = texto_verificacion(verif)
+            log("\n".join(renglones))
+            vpath = args.verificacion or os.path.join(args.salida, "verificacion.txt")
+            try:
+                with open(vpath, "w", encoding="utf-8") as f:
+                    f.write("\n".join(renglones) + "\n")
+                with open(os.path.splitext(vpath)[0] + ".json", "w", encoding="utf-8") as f:
+                    json.dump(verif, f, ensure_ascii=False)
+            except OSError as e:
+                log(f"  (no se pudo guardar la verificación: {e})")
 
         # A Z arriba + escala
         M = A_Z.copy()

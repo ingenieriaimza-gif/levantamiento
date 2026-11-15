@@ -434,7 +434,8 @@ class Server:
         cmds = [
             [py, "-I", "-X", "utf8", os.path.join(TOOLS, "procesar_rgbd.py"), sdir, "--salida", out,
              "--voxel", "0.004", "--dmax", "3.5", "--conf", "2", "--lecturas", "2",
-             "--triangulos-textura", "3000000"] + (["--escala", str(escala), "1"] if escala else [])
+             "--triangulos-textura", "3000000",
+             "--verificacion", os.path.join(sdir, "verificacion.txt")] + (["--escala", str(escala), "1"] if escala else [])
             + (["--ia"] if usar_ia else []),
         ]
         # solo el modelo para Navisworks (FBX) y SolidWorks (3MF); sin vista foto-realista (tardaba mucho)
@@ -507,7 +508,20 @@ class Server:
                 self.status["progreso"] = {"carpeta": os.path.basename(sdir), "fraccion": 1.0,
                                            "etapa": "Listo", "restante_s": 0,
                                            "transcurrido_s": round(time.time() - t0)}
-                await self.send_status(f"Listo. Resultados en {out}")
+                resumen = ""
+                try:
+                    with open(os.path.join(sdir, "verificacion.json"), encoding="utf-8") as f:
+                        v = json.load(f)
+                    con = [m for m in v.get("medidas", []) if "diferencia_mm" in m]
+                    if con:
+                        resumen = (f" Verificación: {len(con)} medida(s) del iPhone comprobada(s), mayor diferencia "
+                                   f"{max(abs(m['diferencia_mm']) for m in con):.1f} mm.")
+                    elif "sesgo_mm" in v:
+                        resumen = f" Verificación: desviación del modelo respecto al LiDAR {v['sesgo_mm']:+.1f} mm."
+                    resumen += " Detalle en verificacion.txt"
+                except (OSError, ValueError):
+                    pass
+                await self.send_status(f"Listo. Resultados en {out}.{resumen}")
         finally:
             self.status["procesando"] = False
             await self.send_status()
