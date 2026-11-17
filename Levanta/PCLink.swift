@@ -340,6 +340,97 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
         }.resume()
     }
 
+    // MARK: Escaneos de la PC (para "Mis escaneos")
+
+    /// Un escaneo guardado en la PC, con su estado.
+    struct PCScan: Identifiable, Hashable {
+        let carpeta: String
+        let nombre: String
+        let fecha: String
+        /// listo · preparando · procesando · escaneando · pendiente · error · solo_pc
+        let estado: String
+        let cuadros: Int
+        let mb: Double
+        let version: Int
+        let progreso: Double?
+        let etapa: String
+        let motivo: String
+        let miniatura: Bool
+        /// Ya se puede abrir en Revisar 3D.
+        let abrible: Bool
+        let foto: Bool
+        var id: String { carpeta }
+
+        var model: PCModel? {
+            guard abrible else { return nil }
+            return PCModel(carpeta: carpeta, nombre: nombre, fecha: fecha, version: version, mb: mb, foto: foto)
+        }
+
+        var detail: String {
+            switch estado {
+            case "listo":
+                return "\(fecha) · modelo listo · \(String(format: "%.0f", mb)) MB"
+            case "preparando":
+                return "\(fecha) · la PC lo está preparando para el iPhone…"
+            case "procesando":
+                let pct = Int(((progreso ?? 0) * 100).rounded())
+                return etapa.isEmpty ? "Creando el modelo… \(pct) %" : "\(pct) % · \(etapa)"
+            case "escaneando":
+                return "Escaneando ahora · \(cuadros) cuadros"
+            case "error":
+                return motivo.isEmpty ? "No se pudo crear el modelo" : "No se pudo crear: \(motivo)"
+            case "solo_pc":
+                return "Modelo listo, pero muy pesado para el iPhone: revísalo en la PC"
+            default:
+                return "\(fecha) · \(cuadros) cuadros · falta crear el modelo en la PC"
+            }
+        }
+
+        var icon: String {
+            switch estado {
+            case "listo": return "cube.fill"
+            case "error": return "exclamationmark.triangle"
+            case "solo_pc": return "desktopcomputer"
+            default: return "clock"
+            }
+        }
+    }
+
+    /// Todos los escaneos de la PC con su estado (la PC conectada es la que los guarda y los procesa).
+    func fetchScans(_ done: @escaping ([PCScan]) -> Void) {
+        guard let base = httpBase else { done([]); return }
+        URLSession.shared.dataTask(with: base.appendingPathComponent("telefono/modelos.json")) { data, _, _ in
+            var out: [PCScan] = []
+            if let data, let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let list = obj["escaneos"] as? [[String: Any]] {
+                for m in list {
+                    guard let c = m["carpeta"] as? String else { continue }
+                    out.append(PCScan(carpeta: c,
+                                      nombre: m["nombre"] as? String ?? c,
+                                      fecha: m["fecha"] as? String ?? "",
+                                      estado: m["estado"] as? String ?? "pendiente",
+                                      cuadros: (m["cuadros"] as? NSNumber)?.intValue ?? 0,
+                                      mb: (m["mb"] as? NSNumber)?.doubleValue ?? 0,
+                                      version: (m["version"] as? NSNumber)?.intValue ?? 0,
+                                      progreso: (m["progreso"] as? NSNumber)?.doubleValue,
+                                      etapa: m["etapa"] as? String ?? "",
+                                      motivo: m["motivo"] as? String ?? "",
+                                      miniatura: (m["miniatura"] as? Bool) ?? false,
+                                      abrible: (m["modelo"] as? Bool) ?? false,
+                                      foto: (m["foto"] as? Bool) ?? false))
+                }
+            }
+            DispatchQueue.main.async { done(out) }
+        }.resume()
+    }
+
+    /// Miniatura (vista en planta) de un escaneo de la PC.
+    func thumbnailURL(_ carpeta: String, version: Int) -> URL? {
+        guard let base = httpBase,
+              let name = carpeta.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) else { return nil }
+        return URL(string: base.absoluteString + "/telefono/miniatura/" + name + "?v=\(version)")
+    }
+
     /// Descarga (o toma del caché) el modelo USDZ terminado. Devuelve la ruta local.
     func downloadModel(_ m: PCModel, progress: @escaping (Double) -> Void, done: @escaping (URL?) -> Void) {
         let dir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]

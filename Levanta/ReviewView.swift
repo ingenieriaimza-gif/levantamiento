@@ -32,9 +32,13 @@ struct ReviewView: View {
     @State private var measuring = false
     @State private var loadID = 0
 
-    init(engine: ScanEngine) {
+    /// Modelo de la PC que se abre directo (cuando se entra desde "Mis escaneos").
+    private let initial: PCLink.PCModel?
+
+    init(engine: ScanEngine, initial: PCLink.PCModel? = nil) {
         _engine = ObservedObject(wrappedValue: engine)
         _link = ObservedObject(wrappedValue: engine.link)
+        self.initial = initial
     }
 
     private var measure: MeasureController {
@@ -171,7 +175,8 @@ struct ReviewView: View {
                     }
                 }
             }
-            if engine.pointCount > 0 { Button("Nube de puntos") { select(.cloud) } }
+            if engine.lastLiveMesh != nil { Button("En vivo (PC)") { select(.live) } }
+            if engine.pointCount > 0 { Button(engine.pcCapture ? "Mapa de recorrido (iPhone)" : "Nube de puntos") { select(.cloud) } }
         } label: {
             HStack(spacing: 4) {
                 Text(sourceTitle).lineLimit(1)
@@ -186,17 +191,41 @@ struct ReviewView: View {
     private func start() {
         engine.setReviewing(true)       // la sesión de seguimiento sigue viva; solo se dejan de sumar puntos mientras miras
         engine.measure.onChange = { [weak engine] list in engine?.sendMeasures(list) }
-        // Los modelos finales de la PC ya no se abren aquí: eran enormes (millones de triángulos y muchas texturas),
-        // la app se cerraba por memoria al abrirlos, y la PC ya no guarda el USDZ (solo el FBX para Navisworks).
+        // Los modelos finales vienen de la PC en una versión ligera hecha para el iPhone (texturas reducidas,
+        // tope de triángulos): el modelo completo cerraba la app por memoria. Hay que estar conectado a la PC.
         models = []
-        chooseDefault()
+        if let initial {
+            models = [initial]
+            select(.final(initial))
+        }
+        let direct = initial != nil
+        guard link.isConnected else {
+            if !direct { chooseDefault() }
+            return
+        }
+        if !direct { loading = "Buscando modelos en la PC…" }
+        link.fetchModels { list in
+            if !list.isEmpty { models = list }
+            if !direct { chooseDefault() }
+        }
     }
 
-    /// Lo más útil primero: el modelo final si es más nuevo que lo último escaneado; si no, lo en vivo.
+    /// Lo más útil primero: el modelo final de la PC si es más nuevo que lo último escaneado;
+    /// si hay un escaneo en curso, lo que la PC lleva en vivo.
     private func chooseDefault() {
-        // solo la nube de puntos del iPhone (la misma que ves al escanear)
-        if engine.pointCount > 0 {
+        let newest = models.first
+        let liveTime = engine.lastLiveMeshTime?.timeIntervalSince1970 ?? 0
+        let inProgress = engine.isScanning || engine.pointCount > 0
+        if let m = newest, !engine.isScanning, Double(m.version) > liveTime {
+            select(.final(m))
+        } else if inProgress, engine.lastLiveMesh != nil {
+            select(.live)
+        } else if engine.pointCount > 0 {
             select(.cloud)
+        } else if let m = newest {
+            select(.final(m))
+        } else if engine.lastLiveMesh != nil {
+            select(.live)
         } else {
             loading = nil
         }
@@ -314,7 +343,10 @@ struct ReviewView: View {
         case .photo: return ""
         case .final: return "Modelo final de la PC con fotos (\(triangles / 1000) k triángulos). Es el más exacto para medir."
         case .live: return "Vista en vivo de la PC (resolución de 1 cm). Para medir con exactitud usa el modelo final."
-        case .cloud: return "Nube rápida del iPhone (sin PC). Para medir con exactitud procesa en la PC."
+        case .cloud:
+            return engine.pcCapture
+                ? "Mapa de recorrido del iPhone (un punto cada 2 cm). El modelo exacto lo crea la PC."
+                : "Nube rápida del iPhone (sin PC). Para medir con exactitud procesa en la PC."
         case nil: return ""
         }
     }

@@ -1,5 +1,6 @@
 import SwiftUI
 import ARKit
+import Combine
 
 private let accent = Color(red: 0.96, green: 0.66, blue: 0.13)   // ámbar de topografía
 
@@ -9,8 +10,19 @@ struct ContentView: View {
     @State private var showScans = false
     @State private var saving = false
     @State private var confirmReset = false
-    @State private var showReview = false
+    @State private var review: ReviewRequest?
     @State private var toast: String?
+
+    /// Abrir Revisar 3D: sin modelo (elige solo lo más útil) o con un modelo de la PC elegido en "Mis escaneos".
+    struct ReviewRequest: Identifiable {
+        let id = UUID()
+        let model: PCLink.PCModel?
+    }
+
+    /// Conectado a la PC: el iPhone solo captura y manda; el modelo lo crea la PC.
+    private var pcMode: Bool {
+        engine.pcCapture || (engine.pointCount == 0 && !engine.isScanning && engine.streamToPC && engine.link.isConnected)
+    }
 
     var body: some View {
         ZStack {
@@ -85,10 +97,16 @@ struct ContentView: View {
                 .presentationDetents([.medium, .large])
         }
         .sheet(isPresented: $showScans) {
-            ScansView()
+            ScansView(link: engine.link, onOpen: { m in
+                // se cierra la lista y, ya cerrada, se abre el modelo de la PC en Revisar 3D
+                showScans = false
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+                    review = ReviewRequest(model: m)
+                }
+            })
         }
-        .fullScreenCover(isPresented: $showReview) {
-            ReviewView(engine: engine)
+        .fullScreenCover(item: $review) { r in
+            ReviewView(engine: engine, initial: r.model)
         }
         .confirmationDialog("¿Borrar el escaneo actual?", isPresented: $confirmReset, titleVisibility: .visible) {
             Button("Borrar y empezar de nuevo", role: .destructive) { engine.reset() }
@@ -181,14 +199,14 @@ struct ContentView: View {
     private var bottomBar: some View {
         VStack(spacing: 14) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(formatCount(engine.pointCount))
+                Text(formatCount(pcMode ? engine.link.pcFrames : engine.pointCount))
                     .font(.system(size: 34, weight: .bold, design: .monospaced))
-                Text("puntos")
+                Text(pcMode ? "cuadros en la PC" : "puntos")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text("2 mm de cerca · 5 mm de lejos")
+                    Text(pcMode ? "solo captura · el 3D lo hace la PC" : "2 mm de cerca · 5 mm de lejos")
                     Text("\(engine.keyframeCount) fotos")
                 }
                 .font(.caption.monospaced())
@@ -217,7 +235,8 @@ struct ContentView: View {
                 circleButton(saving ? "hourglass" : "square.and.arrow.down", label: "Guardar") {
                     save()
                 }
-                .disabled(engine.isScanning || saving || engine.pointCount == 0)
+                // en "solo captura" no hay nube fina que guardar en el iPhone: el modelo queda en la PC
+                .disabled(engine.isScanning || saving || engine.pointCount == 0 || engine.pcCapture)
             }
             .frame(maxWidth: .infinity)
 
@@ -227,7 +246,7 @@ struct ContentView: View {
 
             HStack(spacing: 24) {
                 Button {
-                    showReview = true
+                    review = ReviewRequest(model: nil)
                 } label: {
                     Label("Revisar 3D", systemImage: "rotate.3d")
                         .font(.footnote.weight(.semibold))
@@ -335,17 +354,105 @@ struct SettingsView: View {
 // MARK: - Escaneos guardados
 
 struct ScansView: View {
+    @ObservedObject var link: PCLink
+    /// Abrir en Revisar 3D un modelo terminado de la PC.
+    var onOpen: (PCLink.PCModel) -> Void = { _ in }
     @State private var scans: [URL] = []
+    @State private var pcScans: [PCLink.PCScan] = []
+    @State private var pcLoaded = false
     @State private var toDelete: URL?
     @State private var confirmAll = false
     @State private var error: String?
     @Environment(\.dismiss) private var dismiss
+    private let refresh = Timer.publish(every: 4, on: .main, in: .common).autoconnect()
+
+    init(link: PCLink, onOpen: @escaping (PCLink.PCModel) -> Void = { _ in }) {
+        _link = ObservedObject(wrappedValue: link)
+        self.onOpen = onOpen
+    }
+
+    private var pcConnected: Bool {
+        if case .connected = link.state { return true }
+        return false
+    }
+
+    private func loadPC() {
+        link.fetchScans { list in
+            pcScans = list
+            pcLoaded = true
+        }
+    }
+
+    @ViewBuilder
+    private func pcThumb(_ s: PCLink.PCScan) -> some View {
+        if s.miniatura, let url = link.thumbnailURL(s.carpeta, version: s.version) {
+            AsyncImage(url: url) { img in
+                img.resizable().scaledToFill()
+            } placeholder: {
+                Color.gray.opacity(0.2)
+            }
+            .frame(width: 56, height: 56)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        } else {
+            Image(systemName: s.icon)
+                .font(.title3)
+                .foregroundStyle(.secondary)
+                .frame(width: 56, height: 56)
+                .background(Color.gray.opacity(0.15), in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    private func pcRow(_ s: PCLink.PCScan) -> some View {
+        Button {
+            if let m = s.model { onOpen(m) }
+        } label: {
+            HStack(spacing: 12) {
+                pcThumb(s)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(s.nombre)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(Color.primary)
+                    Text(s.detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if s.estado == "procesando" {
+                        ProgressView(value: min(1, max(0, s.progreso ?? 0)))
+                    }
+                }
+                Spacer()
+                if s.abrible {
+                    Image(systemName: "chevron.right")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .disabled(!s.abrible)
+    }
 
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    if !pcConnected {
+                        Label("Conéctate a la PC para ver sus modelos.", systemImage: "desktopcomputer")
+                            .foregroundStyle(.secondary)
+                    } else if pcScans.isEmpty {
+                        Text(pcLoaded ? "La PC todavía no tiene escaneos." : "Consultando la PC…")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(pcScans) { s in
+                            pcRow(s)
+                        }
+                    }
+                } header: {
+                    Text("En la PC")
+                } footer: {
+                    Text("Los modelos se crean y se guardan en la PC. Toca uno listo para abrirlo en Revisar 3D; hay que estar conectado a la PC.")
+                }
+
                 if scans.isEmpty {
-                    Text("Aún no hay escaneos guardados en el iPhone.")
+                    Text("No hay escaneos guardados en el iPhone.")
                         .foregroundStyle(.secondary)
                 } else {
                     Section {
@@ -421,7 +528,13 @@ struct ScansView: View {
             } message: {
                 Text("Los que ya están en la PC se conservan allá.")
             }
-            .onAppear { scans = ScanStore.list() }
+            .onAppear {
+                scans = ScanStore.list()
+                loadPC()
+            }
+            .onReceive(refresh) { _ in
+                if pcConnected { loadPC() }
+            }
         }
     }
 
