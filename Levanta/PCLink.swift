@@ -132,13 +132,12 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
         }
         browser = b
         b.start(queue: .main)
-        // Si en 4 s no aparece por Bonjour (otra red, o la red bloquea el descubrimiento), se prueban las
-        // direcciones de los puntos de acceso: la PC con zona Wi‑Fi (192.168.137.1) o la PC conectada a la
-        // zona personal del iPhone (172.20.10.x). Así sirve la red local de cualquiera de los dos.
+        // Primero (al mismo tiempo que Bonjour) se prueba la red propia de la PC: su zona Wi‑Fi «Levantamiento3D»,
+        // donde la PC siempre es 192.168.137.1. También la PC conectada a la zona personal del iPhone (172.20.10.x).
         probeWork?.cancel()
         let w = DispatchWorkItem { [weak self] in self?.probeHotspots() }
         probeWork = w
-        DispatchQueue.main.asyncAfter(deadline: .now() + 4, execute: w)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: w)
     }
 
     private func cancelProbes() {

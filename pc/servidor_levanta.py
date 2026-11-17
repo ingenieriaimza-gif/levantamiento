@@ -937,7 +937,23 @@ class Server:
         return web.FileResponse(os.path.join(AQUI, "web", "visor.html"))
 
     async def estado(self, request):
-        return web.json_response({**self.status, "ips": local_ips(), "puerto": self.port})
+        return web.json_response({**self.status, "ips": local_ips(), "puerto": self.port,
+                                  "zona": getattr(self, "zona", None)})
+
+    async def zona_loop(self):
+        """Mantiene encendida la zona Wi‑Fi propia de la PC (Windows la apaga si nadie la usa un rato)."""
+        import zona_wifi
+        loop = asyncio.get_running_loop()
+        ultimo = None
+        while True:
+            try:
+                self.zona = await loop.run_in_executor(None, zona_wifi.encender)
+                if self.zona.get("mensaje") != ultimo:
+                    print(self.zona["mensaje"], flush=True)
+                    ultimo = self.zona.get("mensaje")
+            except Exception as e:      # noqa: BLE001 — nunca debe tirar el programa
+                print("Zona Wi‑Fi:", e, flush=True)
+            await asyncio.sleep(60)
 
 
 def advertise(port):
@@ -995,11 +1011,13 @@ def main():
     async def on_start(_app):
         _app["mesh_loop"] = asyncio.create_task(srv.mesh_loop())
         _app["vigilar"] = asyncio.create_task(srv.vigilar())
+        _app["zona"] = asyncio.create_task(srv.zona_loop())
         _app["zc"] = await asyncio.get_running_loop().run_in_executor(None, advertise, args.puerto)
 
     async def on_stop(_app):
         _app["mesh_loop"].cancel()
         _app["vigilar"].cancel()
+        _app["zona"].cancel()
         if srv.proc_actual is not None and srv.proc_actual.returncode is None:
             matar_arbol(srv.proc_actual.pid)        # al cerrar el programa no quedan procesos trabajando
         if _app.get("zc"):

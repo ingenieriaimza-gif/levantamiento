@@ -160,7 +160,7 @@
   <div id="hint" class="panel" hidden></div>
   <div id="labels"></div>
   <div id="log" class="panel"></div>
-  <div id="ips" class="panel"><span>Dirección para la app del iPhone</span><b id="addr">…</b><span id="addr2"></span></div>
+  <div id="ips" class="panel"><span>Dirección para la app del iPhone</span><b id="addr">…</b><span id="addr2"></span><span id="zona" style="display:block;max-width:340px;margin-top:6px"></span></div>
 </section>
 
 <section id="tab-escaneos" class="page" hidden>
@@ -529,11 +529,21 @@ function connect() {
 }
 connect();
 
-fetch('/estado').then(r => r.json()).then(s => {
+function leerEstado() {
+  fetch('/estado').then(r => r.json()).then(s => {
   const ips = s.ips || [];
   $('addr').textContent = ips.length ? `${ips[0]}:${s.puerto}` : 'sin red';
   $('addr2').textContent = ips.slice(1).map(ip => `${ip}:${s.puerto}`).join('  ·  ');
+  if (s.zona) {
+    $('zona').textContent = s.zona.activa
+      ? `Red propia de la PC: «${s.zona.nombre}» · contraseña «${s.zona.clave}»` + (s.zona.clientes ? ' · iPhone conectado' : ' · conecta el iPhone a esta red')
+      : s.zona.mensaje;
+    if (s.zona.activa) $('addr').textContent = `${s.zona.ip}:${s.puerto}`;
+  }
 }).catch(() => {});
+}
+leerEstado();
+setInterval(leerEstado, 15000);
 
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
