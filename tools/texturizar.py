@@ -200,13 +200,11 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         qu = np.clip(np.nan_to_num((uv_u + 0.5) / zbuf_scale - 0.5).round().astype(int), 0, zw - 1)
         qv = np.clip(np.nan_to_num((uv_v + 0.5) / zbuf_scale - 0.5).round().astype(int), 0, zh - 1)
         vz = zbuf[qv, qu]
-        vvis = (np.abs(vz - zvv) < np.maximum(0.012, 0.01 * np.abs(zvv))).reshape(-1, 3).all(1)
+        nvis = (np.abs(vz - zvv) < np.maximum(0.012, 0.01 * np.abs(zvv))).reshape(-1, 3).sum(1)
         en_orilla = orilla[qv, qu].reshape(-1, 3).any(1)
         inside = inside.reshape(-1, 3).all(1)
-        if ESTRICTO:
-            inside &= vvis                      # un vértice tapado = esta foto no ve bien el triángulo
         idx = idx[inside]
-        vvis = vvis[inside]
+        nvis = nvis[inside]
         en_orilla = en_orilla[inside]
         if len(idx) == 0:
             return None
@@ -216,8 +214,13 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         # de frente, cerca, y lejos del borde de la foto (menos distorsión)
         edge = np.minimum.reduce([u[idx], w - u[idx], v[idx], h - v[idx]]) / (0.5 * min(w, h))
         score = (cosang ** 2) / (dist ** 1.5) * sharp_w[k] * np.clip(edge, 0.25, 1.0) * (w / 1920.0) ** 0.7
-        # si algún vértice queda tapado, la foto sólo sirve como último recurso
-        score = np.where(vvis, score, score * 0.02)
+        # Vértices tapados: con los 3 visibles la foto vale completa; si no, baja mucho, pero NO se descarta:
+        # en un lugar con muchas cosas (repisas, ropa, herramienta) hay triángulos que ninguna foto ve completos,
+        # y descartarlos los dejaba sin foto (solo color plano). Así se usa la mejor que haya como último recurso.
+        if ESTRICTO:
+            score = score * np.array([1e-4, 0.01, 0.25, 1.0], np.float32)[nvis]
+        else:
+            score = np.where(nvis == 3, score, score * 0.02)
         score = np.where(en_orilla, score * PESO_ORILLA, score)
         return idx, score.astype(np.float32)
 
