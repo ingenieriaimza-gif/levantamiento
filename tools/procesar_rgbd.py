@@ -81,9 +81,26 @@ def giro_vertical(phi):
 PIXEL_OFFSET = float(os.environ.get("RGBD_PIXEL_OFFSET", "0.5"))
 
 
+ATASCO_S = int(os.environ.get("LEVANTA_ATASCO_S", "90"))
+
+
+def _vigia_atasco():
+    """Si pasan ATASCO_S segundos sin ningún mensaje, escribe en qué línea va cada hilo (y lo repite).
+    Lo hace un hilo de C (faulthandler): funciona aunque Open3D o numpy tengan ocupado a Python.
+    Se vuelve a armar con cada mensaje, así que mientras el proceso avanza no escribe nada."""
+    if ATASCO_S <= 0:
+        return
+    try:
+        import faulthandler
+        faulthandler.dump_traceback_later(ATASCO_S, repeat=True, file=sys.stdout)
+    except Exception:       # noqa: BLE001
+        pass
+
+
 def progreso(frac, etapa):
     """Línea de avance para el programa de la PC (barra, porcentaje y tiempo restante)."""
     print(f"@@PROGRESO {max(0.0, min(1.0, frac)):.4f}|{etapa}", flush=True)
+    _vigia_atasco()
 
 
 # avance total de este script (el programa de la PC deja el 4 % final para el Gaussian Splatting)
@@ -100,6 +117,7 @@ def avance(etapa, f, texto):
 
 def log(msg):
     print(msg, flush=True)
+    _vigia_atasco()
 
 
 # ---------------------------------------------------------------- lectura
@@ -372,7 +390,9 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
         from paralelo import nucleos
         sh = []
         with ThreadPoolExecutor(max_workers=nucleos()) as ex:      # todas las fotos a la vez
-            for i, v in enumerate(ex.map(lambda fr: sharpness(fr["jpg"]), frames)):
+            # la nitidez de cada foto se mide una sola vez (antes se repetía en cada una de las 5 uniones)
+            for i, v in enumerate(ex.map(lambda fr: fr["_nit"] if "_nit" in fr else sharpness(fr["jpg"]), frames)):
+                frames[i]["_nit"] = v
                 sh.append(v)
                 if i % 20 == 0 and etapa == "fusion":
                     avance("nitidez", i / len(frames), "Revisando fotos movidas")
@@ -459,10 +479,16 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
                 Et = o3c.Tensor(E, o3c.float64)
                 dimg = o3d.t.geometry.Image(o3c.Tensor(depth))
                 cimg = o3d.t.geometry.Image(o3c.Tensor(color))
-                coords = vbg.compute_unique_block_coordinates(dimg, Kt, Et, 1000.0, dmax,
-                                                              trunc_voxel_multiplier=trunc_mult)
-                vbg.integrate(coords, dimg, cimg, Kt, Et, 1000.0, dmax, trunc_voxel_multiplier=trunc_mult)
-                n_ok += 1
+                try:
+                    coords = vbg.compute_unique_block_coordinates(dimg, Kt, Et, 1000.0, dmax,
+                                                                  trunc_voxel_multiplier=trunc_mult)
+                    if coords.shape[0] == 0:
+                        raise RuntimeError("cuadro sin bloques en el volumen")
+                    vbg.integrate(coords, dimg, cimg, Kt, Et, 1000.0, dmax, trunc_voxel_multiplier=trunc_mult)
+                    n_ok += 1
+                except RuntimeError as e:
+                    # un cuadro sin profundidad útil dentro de rango no debe tumbar toda la pieza
+                    log(f"  cuadro {n + 1} omitido en {etapa}: {str(e).splitlines()[0][:120]}")
             if n % 5 == 0 and etapa in ("fusion", "fusion2", "completo"):
                 avance(etapa, 0.85 * (n + 1) / len(used),
                        f"Uniendo cuadros {n + 1} de {len(used)}" if etapa == "fusion"
@@ -472,6 +498,13 @@ def fuse(meta, frames, voxel, trunc, dmax, min_conf, drop_blur, ia=None, ia_widt
                 log(f"  {n + 1}/{len(used)} cuadros fusionados ({time.time() - t0:.0f} s)")
     if ia_aporte:
         log(f"  IA: aportó detalle en {np.mean(ia_aporte) * 100:.0f} % de los píxeles (el resto, LiDAR)")
+    if etapa in ("fusion", "completo"):
+        try:
+            hm = vbg.hashmap()
+            log(f"  volumen a {voxel * 1000:.1f} mm: {int(hm.size()):,} bloques (previstos {block_count:,}; "
+                f"~{int(hm.size()) * 10240 / 1e6:.0f} MB de datos)")
+        except Exception:       # noqa: BLE001
+            pass
     return vbg, n_ok, dropped
 
 
@@ -545,7 +578,10 @@ def piezas_en_detalle(meta, frames, zonas, base, lecturas, voxel=0.002):
         avance("detalle", k / len(zonas), f"Detalle de {nombre} ({len(cerca)} tomas de cerca)")
         vbg, n_ok, _ = fuse(meta, cerca, voxel, 5.0 * voxel, 1.5, 2, True, etapa="detalle", zona=z,
                             block_count=40000)
-        fino, _ = extract(vbg, lecturas)
+        if n_ok == 0:
+            log(f"  {nombre}: ningún cuadro útil en el detalle; se queda con el detalle normal")
+            continue
+        fino, _ = extract(vbg, lecturas, nube=False)
         del vbg
         F = np.asarray(fino.triangles)
         if len(F) == 0:
@@ -591,13 +627,21 @@ def separar_zonas(mesh, zonas):
     return fuera, dentro
 
 
-def extract(vbg, min_weight):
-    """Malla y nube (legado) a partir del volumen. min_weight = lecturas mínimas por vóxel."""
+def extract(vbg, min_weight, nube=True):
+    """Malla y nube (legado) a partir del volumen. min_weight = lecturas mínimas por vóxel.
+    nube=False: solo la malla (la nube completa a 4 mm pesa casi lo mismo que la malla y en el modo normal
+    no se usa; en una PC con 5 GB de RAM sacar las dos a la vez la hacía paginar al disco y congelarse)."""
     tmesh = vbg.extract_triangle_mesh(weight_threshold=min_weight)
-    tpcd = vbg.extract_point_cloud(weight_threshold=min_weight)
     mesh = tmesh.to_legacy()
-    pcd = tpcd.to_legacy()
+    del tmesh                                   # no tener la malla dos veces en memoria
+    pcd = None
+    if nube:
+        tpcd = vbg.extract_point_cloud(weight_threshold=min_weight)
+        pcd = tpcd.to_legacy()
+        del tpcd
     for g in (mesh, pcd):
+        if g is None:
+            continue
         cols = np.asarray(g.vertex_colors if isinstance(g, o3d.geometry.TriangleMesh) else g.colors)
         if cols.size and cols.max() > 1.5:          # colores guardados en 0–255
             cols = cols / 255.0
@@ -688,7 +732,12 @@ def main():
                     help="modelo con fotos sobre la malla exacta (sin completar zonas de confianza media)")
     ap.add_argument("--ia", action="store_true", help="refinar la profundidad con IA (Prompt Depth Anything)")
     ap.add_argument("--ia-ancho", type=int, default=768, help="ancho de la profundidad refinada por IA")
-    ap.add_argument("--triangulos-textura", type=int, default=700_000)
+    ap.add_argument("--triangulos-textura", type=int, default=0,
+                    help="triángulos del modelo con fotos (0 = según la memoria de esta PC)")
+    ap.add_argument("--avance", default=None,
+                    help="carpeta donde guardar el avance: si se cancela o falla, la siguiente vez continúa "
+                         "desde la última etapa terminada")
+    ap.add_argument("--desde-cero", action="store_true", help="descartar el avance guardado y empezar de nuevo")
     ap.add_argument("--pagina-textura", type=int, default=4096, help="tamaño de cada página de textura")
     ap.add_argument("--escala-textura", type=float, default=1.0,
                     help="reduce las fotos en la textura (p. ej. 0.5 para un modelo ligero para el iPhone)")
@@ -716,6 +765,51 @@ def main():
         if fotos_hr:
             log(f"Fotos de máxima resolución: {len(fotos_hr)} ({fotos_hr[0]['w']}×{fotos_hr[0]['h']})")
         T_antes = [list(fr["T"]) for fr in frames]
+        import gc
+        from perfil import perfil, celdas_ocupadas, elegir_voxel, bloques_a_reservar
+        from avance_guardado import Avance, clave_de, malla_a_tablas, tablas_a_malla
+
+        # --- la PC y el tamaño del espacio deciden los ajustes (ver perfil.py): así cabe en memoria
+        pf = perfil()
+        target_tex = args.triangulos_textura or pf["triangulos"]
+        avance("carga", 0.5, "Midiendo el tamaño del espacio")
+        n_celdas, ext = celdas_ocupadas(meta, frames, args.dmax, args.conf, pose_matrix)
+        voxel = elegir_voxel(n_celdas, args.voxel, target_tex)
+        trunc = args.trunc or 5 * voxel
+        log(f"Esta PC: {pf['ram_gb']} GB de RAM -> modo {pf['nombre']} ({target_tex:,} triángulos con fotos, "
+            f"hasta {pf['paginas']} páginas de textura, {pf['procesos']} procesos a la vez)")
+        log(f"Espacio escaneado: {ext[0]:.1f} × {ext[2]:.1f} m, {ext[1]:.1f} m de alto, "
+            f"~{n_celdas * 0.0025 / 1.3:.0f} m² de superficie, {len(frames)} cuadros -> vóxel de {voxel * 1000:.1f} mm"
+            + ("" if voxel <= args.voxel + 1e-9 else
+               f" (en vez de {args.voxel * 1000:.0f} mm: es lo más fino que cabe en la memoria de esta PC)"))
+
+        def _bloques(celdas, v):
+            return bloques_a_reservar(celdas, v)
+
+        firmas = []
+        for d in dirs:
+            try:
+                st = os.stat(os.path.join(d, "frames.jsonl"))
+                firmas.append([st.st_size, int(st.st_mtime)])
+            except OSError:
+                firmas.append([0, 0])
+        clave = clave_de(firmas, len(frames), len(fotos_hr), voxel, trunc, args.dmax, args.conf, args.lecturas,
+                         bool(args.ia), args.sin_alinear, args.sin_completo, args.sin_filtro_borrosas, target_tex,
+                         pf["nombre"], os.environ.get("LEVANTA_ACABADO", ""), os.environ.get("LEVANTA_RONDAS_ALINEAR", ""))
+        ck = Avance(None if todos else args.avance, clave, log)
+        if args.desde_cero:
+            ck._vaciar()
+            ck.estado["etapas"] = {}
+
+        def _poner_poses(lista, guardadas):
+            n = 0
+            for fr in lista:
+                T = guardadas.get(str(int(fr["i"])))
+                if T is not None:
+                    fr["T"] = list(T)
+                    n += 1
+            return n
+
         ia = None
         if args.ia:
             from ia_profundidad import RefinadorIA, disponible
@@ -724,51 +818,81 @@ def main():
             else:
                 ia = RefinadorIA()
                 log(f"IA de profundidad activa ({ia.device})")
-        vbg, used, dropped = fuse(meta, frames, args.voxel, trunc, args.dmax, args.conf,
-                                  not args.sin_filtro_borrosas, ia=ia, ia_width=args.ia_ancho)
-        log(f"Fusionados {used} cuadros ({dropped} descartados por borrosos)")
+        zonas = cargar_zonas(dirs)
+        n_detalle = 0
+        pcd = None
 
-        avance("malla", 0, "Formando las superficies")
-        mesh, pcd = extract(vbg, args.lecturas)
-        del vbg                                   # liberar el volumen antes de texturizar
-        import gc
-        gc.collect()
-        rondas = int(os.environ.get("LEVANTA_RONDAS_ALINEAR", "3"))       # 3 vueltas de alineación
-        for ronda in range(rondas if not args.sin_alinear and len(frames) >= 20 else 0):
-            if not len(mesh.triangles):
-                break
-            # corregir la deriva del iPhone (evita superficies dobles) y volver a unir los cuadros;
-            # la segunda vuelta alinea contra el modelo ya corregido (más nítido)
-            from alinear import refinar_poses
-            ref = clean_mesh(mesh, min_triangles=400)
-            n_corr = refinar_poses(meta, frames, ref, ARKIT_TO_CV,
-                                   avance=lambda f, t: avance("alinear", (ronda + f) / rondas, t), log=log)
-            del ref
-            if not n_corr:
-                break
-            with open(os.path.join(args.salida, "poses_corregidas.json"), "w") as f:
-                json.dump({"/".join(fr["depth"].replace("\\", "/").split("/")[-3:]): fr["T"]
-                           for k, fr in enumerate(frames)}, f)
-            vbg, used, dropped = fuse(meta, frames, args.voxel, trunc, args.dmax, args.conf,
+        # ---------------- ETAPA 1: la forma del espacio (unir cuadros, corregir la deriva, malla exacta)
+        geo = ck.cargar("geometria")
+        if geo:
+            datos, tablas = geo
+            _poner_poses(frames, datos["T"])
+            mesh = tablas_a_malla(tablas)
+            used, dropped, n_detalle = datos["used"], datos["dropped"], datos["n_detalle"]
+            del tablas
+            log(f"Se continúa donde se quedó: la forma del espacio ya estaba hecha ({len(mesh.triangles):,} "
+                "triángulos); no se repite.")
+            avance("detalle", 1.0, "Forma del espacio recuperada del avance guardado")
+        else:
+            ronda0 = 0
+            pos = ck.cargar("poses")
+            if pos:
+                _poner_poses(frames, pos[0]["T"])
+                ronda0 = int(pos[0]["ronda"])
+                log(f"Se continúa donde se quedó: la deriva ya estaba corregida ({ronda0} vuelta(s)).")
+            vbg, used, dropped = fuse(meta, frames, voxel, trunc, args.dmax, args.conf,
                                       not args.sin_filtro_borrosas, ia=ia, ia_width=args.ia_ancho,
-                                      etapa="fusion2")
+                                      etapa="fusion" if not ronda0 else "fusion2",
+                                      block_count=_bloques(n_celdas, voxel))
+            log(f"Fusionados {used} cuadros ({dropped} descartados por borrosos)")
+
             avance("malla", 0, "Formando las superficies")
-            mesh, pcd = extract(vbg, args.lecturas)
-            del vbg
+            mesh, pcd = extract(vbg, args.lecturas, nube=todos)
+            del vbg                                   # liberar el volumen antes de texturizar
             gc.collect()
+            rondas = int(os.environ.get("LEVANTA_RONDAS_ALINEAR", "3"))       # 3 vueltas de alineación
+            for ronda in range(ronda0, rondas if not args.sin_alinear and len(frames) >= 20 else 0):
+                if not len(mesh.triangles):
+                    break
+                # corregir la deriva del iPhone (evita superficies dobles) y volver a unir los cuadros;
+                # la segunda vuelta alinea contra el modelo ya corregido (más nítido)
+                from alinear import refinar_poses
+                ref = clean_mesh(mesh, min_triangles=400)
+                n_corr = refinar_poses(meta, frames, ref, ARKIT_TO_CV,
+                                       avance=lambda f, t: avance("alinear", (ronda + f) / rondas, t), log=log)
+                del ref
+                if not n_corr:
+                    break
+                with open(os.path.join(args.salida, "poses_corregidas.json"), "w") as f:
+                    json.dump({"/".join(fr["depth"].replace("\\", "/").split("/")[-3:]): fr["T"]
+                               for k, fr in enumerate(frames)}, f)
+                ck.guardar("poses", f"deriva corregida, vuelta {ronda + 1} de {rondas}",
+                           datos={"ronda": ronda + 1, "T": {str(int(fr["i"])): list(fr["T"]) for fr in frames}})
+                del mesh
+                gc.collect()
+                vbg, used, dropped = fuse(meta, frames, voxel, trunc, args.dmax, args.conf,
+                                          not args.sin_filtro_borrosas, ia=ia, ia_width=args.ia_ancho,
+                                          etapa="fusion2", block_count=_bloques(n_celdas, voxel))
+                avance("malla", 0, "Formando las superficies")
+                mesh, pcd = extract(vbg, args.lecturas, nube=todos)
+                del vbg
+                gc.collect()
+            mesh = clean_mesh(mesh, min_triangles=400)
+            avance("malla", 0.6, "Alisando las superficies")
+            mesh = acabado(mesh)
+            if zonas:
+                log(f"Piezas enfocadas en el iPhone: {len(zonas)}")
+                mesh, n_detalle = piezas_en_detalle(meta, frames, zonas, mesh, args.lecturas)
+            ck.guardar("geometria", "forma del espacio (malla exacta)",
+                       datos={"T": {str(int(fr["i"])): list(fr["T"]) for fr in frames},
+                              "used": used, "dropped": dropped, "n_detalle": n_detalle},
+                       **malla_a_tablas(mesh))
         A_Z = Y_UP_TO_Z_UP.copy()
         scale = 1.0
         if args.escala:
             real, measured = args.escala
             scale = real / measured
             log(f"Calibración de escala: ×{scale:.5f}")
-        mesh = clean_mesh(mesh, min_triangles=400)
-        mesh = acabado(mesh)
-        zonas = cargar_zonas(dirs)
-        n_detalle = 0
-        if zonas:
-            log(f"Piezas enfocadas en el iPhone: {len(zonas)}")
-            mesh, n_detalle = piezas_en_detalle(meta, frames, zonas, mesh, args.lecturas)
         if todos:
             pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=16, std_ratio=2.5)
 
@@ -782,6 +906,20 @@ def main():
             texturizar.AVANCE = lambda f, t: avance("fotos", f, t)
             texturizar.EXPORTAR_OBJ = todos
             kf = [f for f in frames if f.get("kf", True)] or frames     # fotos clave (las más nítidas)
+            # ---------------- ETAPA 2: la malla que llevará las fotos (zonas difíciles, acabado, reducción)
+            mf = ck.cargar("malla_fotos")
+        if not args.sin_textura and mf:
+            datos, tablas = mf
+            tex_mesh = tablas_a_malla(tablas)
+            del tablas
+            _poner_poses(fotos_hr, datos["T_hr"])
+            if fotos_hr:
+                kf = kf + fotos_hr
+            A_Z = np.array(datos["A_Z"], float)
+            tex_dmax, target_tex, verif = datos["tex_dmax"], datos["target"], datos["verif"]
+            log(f"Se continúa donde se quedó: la malla para las fotos ya estaba hecha ({len(tex_mesh.triangles):,} "
+                "triángulos); se pasa directo a poner las fotos.")
+        elif not args.sin_textura:
             if fotos_hr:
                 n_hr = corregir_fotos_hr(fotos_hr, frames, T_antes)
                 log(f"  {n_hr} fotos de máxima resolución con la deriva corregida")
@@ -800,10 +938,12 @@ def main():
             tex_mesh, tex_dmax = mesh, args.dmax
             if not args.sin_completo:
                 try:
-                    v2 = max(args.voxel, 0.006)
+                    celdas2, _ = celdas_ocupadas(meta, frames, max(args.dmax, 5.0), 1, pose_matrix)
+                    v2 = elegir_voxel(celdas2, max(1.5 * voxel, 0.006), target_tex)
                     vbg2, _, _ = fuse(meta, frames, v2, 5.0 * v2, max(args.dmax, 5.0), 1,
-                                      not args.sin_filtro_borrosas, etapa="completo", max_tan=5.0)
-                    m2, _ = extract(vbg2, args.lecturas)
+                                      not args.sin_filtro_borrosas, etapa="completo", max_tan=5.0,
+                                      block_count=_bloques(celdas2, v2))
+                    m2, _ = extract(vbg2, args.lecturas, nube=False)
                     del vbg2
                     gc.collect()
                     avance("completo", 0.9, "Limpiando el modelo completo")
@@ -824,14 +964,23 @@ def main():
             # acabado del modelo con fotos (el que se ve en Navisworks): orillas sin fleco, sin pedazos
             # sueltos, sin agujeros chicos y superficies más lisas (el LiDAR deja ondas de 1–2 mm)
             modo = os.environ.get("LEVANTA_ACABADO", "poisson")       # superficie continua (como las apps comerciales)
+            continua = None
             if modo == "poisson":
                 from paralelo import superficie_continua
-                tex_mesh = superficie_continua(tex_mesh, log=log)
+                # None = el espacio es demasiado grande para hacer la superficie continua en la memoria de esta PC
+                continua = superficie_continua(tex_mesh, log=log, celda=max(0.006, 1.5 * voxel),
+                                               max_profundidad=pf["poisson"])
+            if continua is not None:
+                tex_mesh = continua
             else:
+                avance("fotos", 0.01, "Limpiando orillas y tapando huecos")
                 tex_mesh = limpiar_orillas(tex_mesh, log=log)
                 tex_mesh = tapar_huecos(tex_mesh, log=log)
                 tex_mesh = taubin_paralelo(tex_mesh, 10, log=log)
-            target_tex = args.triangulos_textura
+            del continua
+            if not todos:
+                mesh = None             # la malla exacta ya no se usa en el modo normal: se suelta (memoria)
+            gc.collect()
             if n_detalle:
                 # el presupuesto de triángulos se reparte: las piezas conservan su detalle (hasta la mitad)
                 fuera, dentro = separar_zonas(tex_mesh, zonas)
@@ -860,8 +1009,28 @@ def main():
                 o3d.io.write_triangle_mesh(volcar + ".ply", tex_mesh)
                 with open(volcar + ".pkl", "wb") as f:
                     pickle.dump({"kf": kf, "dmax": tex_dmax, "target": target_tex}, f)
+            # la reducción al tamaño final se hace aquí (no dentro del texturizado) para poder guardar el avance
+            if len(tex_mesh.triangles) > target_tex:
+                avance("fotos", 0.02, "Reduciendo la malla al tamaño que maneja esta PC")
+                tex_mesh = simplificar(tex_mesh, target_tex, log=log)
+                gc.collect()
+            ck.guardar("malla_fotos", "malla lista para poner las fotos",
+                       datos={"T_hr": {str(int(ft["i"])): list(ft["T"]) for ft in fotos_hr},
+                              "A_Z": A_Z.tolist(), "tex_dmax": tex_dmax, "target": target_tex, "verif": verif},
+                       **malla_a_tablas(tex_mesh))
+        ext_final = None
+        if not args.sin_textura:
+            # ---------------- ETAPA 3: poner las fotos sobre la malla
             holder, hibrida = [tex_mesh], tex_mesh is not mesh
             del tex_mesh
+            if not todos:
+                # tamaño del modelo para el reporte (se mide en la malla que se entrega)
+                Mx = A_Z.copy()
+                Mx[:3, :3] *= scale
+                Vt = np.asarray(holder[0].vertices) @ Mx[:3, :3].T
+                ext_final = (Vt.min(0), Vt.max(0)) if len(Vt) else (np.zeros(3), np.zeros(3))
+                del Vt
+                mesh = None
             gc.collect()
             comparar = None
             if args.comparar:
@@ -869,7 +1038,7 @@ def main():
                 resto = [f for f in frames if not f.get("kf", True)]
                 comparar = (args.comparar, resto if len(resto) >= 8 else [f for f in kf if int(f.get("w", 0)) < 3000] or kf)
             tex_info = texture_mesh(holder.pop(), kf, args.salida, dmax=tex_dmax, consume=hibrida, comparar=comparar,
-                                    target_triangles=target_tex,
+                                    target_triangles=target_tex, max_paginas=pf["paginas"], avance_ck=ck,
                                     page_size=args.pagina_textura,
                                     texture_scale=args.escala_textura,
                                     to_z_up=A_Z, scale=scale)
@@ -889,18 +1058,22 @@ def main():
         # A Z arriba + escala
         M = A_Z.copy()
         M[:3, :3] *= scale
-        mesh.transform(M)
-        pcd.transform(M)
-        mesh.compute_vertex_normals()
-
+        if pcd is not None:
+            pcd.transform(M)
         out = lambda n: os.path.join(args.salida, n)
-        lo, hi = np.asarray(mesh.vertices).min(0), np.asarray(mesh.vertices).max(0)
+        if mesh is not None:
+            mesh.transform(M)
+            mesh.compute_vertex_normals()
+            lo, hi = np.asarray(mesh.vertices).min(0), np.asarray(mesh.vertices).max(0)
+        else:
+            lo, hi = ext_final
         if not todos:
+            ck.borrar()             # modelo terminado: el avance guardado ya no hace falta
             # solo el archivo que se usa: FBX con fotos para Navisworks (ya guardado)
             rep = [
                 "Levantamiento 3D",
                 f"Cuadros: {len(frames)} recibidos, {used} usados, {dropped} borrosos descartados",
-                f"Vóxel: {args.voxel * 1000:.1f} mm · escala ×{scale:.5f}",
+                f"Vóxel: {voxel * 1000:.1f} mm · escala ×{scale:.5f} · modo {pf['nombre']} ({pf['ram_gb']} GB de RAM)",
                 f"Extensión (X × Y × Z): {hi[0] - lo[0]:.3f} × {hi[1] - lo[1]:.3f} × {hi[2] - lo[2]:.3f} m",
                 *([f"Piezas enfocadas: {len(zonas)}; reconstruidas a 2 mm ({n_detalle:,} triángulos de detalle)."]
                   if zonas else []),
@@ -933,7 +1106,7 @@ def main():
         stl, stl_det = separar_zonas(stl, zonas_z)       # las piezas en detalle no se reducen
         if len(stl.triangles) > args.max_triangulos_stl:
             ratio = math.sqrt(len(stl.triangles) / args.max_triangulos_stl)
-            stl = stl.simplify_vertex_clustering(voxel_size=args.voxel * ratio)
+            stl = stl.simplify_vertex_clustering(voxel_size=voxel * ratio)
             stl.remove_degenerate_triangles()
             stl.remove_unreferenced_vertices()
         stl = stl.filter_smooth_taubin(number_of_iterations=5)
@@ -947,7 +1120,7 @@ def main():
         rep = [
             "Levantamiento 3D — fusión RGB-D",
             f"Cuadros: {len(frames)} recibidos, {used} usados, {dropped} borrosos descartados",
-            f"Vóxel TSDF: {args.voxel * 1000:.1f} mm · truncamiento {trunc * 1000:.0f} mm · "
+            f"Vóxel TSDF: {voxel * 1000:.1f} mm · truncamiento {trunc * 1000:.0f} mm · "
             f"profundidad máx. {args.dmax} m · confianza mín. {args.conf} · lecturas mín. {args.lecturas:g}",
             f"Escala aplicada: ×{scale:.5f}",
             f"Nube: {len(pts):,} puntos",

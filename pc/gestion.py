@@ -138,8 +138,10 @@ def pick_folder_dialog(initial):
 
 # Los modelos con fotos de 12 MP pesan poco en archivo pero ocupan gigas ya abiertos y cierran la app del iPhone
 # ("Revisar 3D"). Ya no se ofrecen al iPhone: el modelo para Navisworks es el que se usa.
-OFRECER_MODELOS_AL_IPHONE = False
-MAX_USDZ_IPHONE = 40 * 1024 * 1024       # más que esto no se ofrece al iPhone (las texturas grandes lo cierran)
+# (Desde la versión 58 sí se ofrecen: en una versión ligera hecha aparte, tools/fbx_a_usdz.py: texturas reducidas
+# y tope de 1.3 millones de triángulos. El FBX completo sigue siendo solo para Navisworks.)
+OFRECER_MODELOS_AL_IPHONE = True
+MAX_USDZ_IPHONE = 90 * 1024 * 1024       # más que esto no se ofrece al iPhone
 IA_DIR = os.path.join(RAIZ, "ia")
 IA_PAQUETES = os.path.join(IA_DIR, "paquetes")
 IA_MODELOS = os.path.join(IA_DIR, "modelos")
@@ -250,6 +252,19 @@ def _html_de(res):
     except OSError:
         pass
     return None
+
+
+def _avance_guardado(sdir):
+    """Última etapa guardada de un modelo a medias (texto para la lista), o None."""
+    try:
+        with open(os.path.join(sdir, "avance", "estado.json"), encoding="utf-8") as f:
+            etapas = json.load(f).get("etapas", {})
+        if not etapas:
+            return None
+        ultima = max(etapas.values(), key=lambda e: e.get("hora", ""))
+        return {"texto": ultima.get("texto", ""), "hora": ultima.get("hora", "")}
+    except (OSError, ValueError):
+        return None
 
 
 def _first_line(path):
@@ -375,6 +390,7 @@ class Gestion:
                     "con_modelo": any(f["nombre"] in ("malla_solidworks.stl", "modelo_solidworks.3mf",
                                                       "obj/modelo_navisworks.fbx") for f in files),
                     "error": _first_line(os.path.join(res, "error.txt")),
+                    "avance": _avance_guardado(d),
                     "fase": self.server.status.get("fase") if processing else None,
                     "vista_foto": os.path.exists(os.path.join(res, "vista_foto.ply")),
                     "html": _html_de(res),
@@ -392,40 +408,92 @@ class Gestion:
 
     # ---------- para el iPhone: modelos terminados (solo lectura en la red local)
 
+    @staticmethod
+    def _cuadros(d):
+        try:
+            with open(os.path.join(d, "frames.jsonl"), encoding="utf-8") as f:
+                return sum(1 for line in f if line.strip())
+        except OSError:
+            try:
+                with open(os.path.join(d, "cuadros.txt")) as f:       # capturas ya borradas
+                    return int(f.read().strip() or 0)
+            except (OSError, ValueError):
+                return 0
+
     async def tel_modelos(self, request):
-        items = []
-        if not OFRECER_MODELOS_AL_IPHONE:
-            return web.json_response({"modelos": items})
-        if os.path.isdir(self.root):
-            live = self.server.session.dir if self.server.session is not None else None
-            for name in sorted(os.listdir(self.root), reverse=True):
-                d = os.path.join(self.root, name)
-                p = os.path.join(d, "resultado", "modelo_texturizado.usdz")
-                if not (name.startswith("RGBD_") and os.path.exists(p)):
-                    continue
-                if live and os.path.normpath(live) == os.path.normpath(d):
-                    continue
-                st = os.stat(p)
-                if st.st_size > MAX_USDZ_IPHONE:       # modelos enormes (millones de triángulos) cierran la app del iPhone
-                    continue
-                items.append({"carpeta": name, "nombre": name.replace("RGBD_", ""),
-                              "fecha": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
-                              "version": int(st.st_mtime), "mb": round(st.st_size / 1e6, 1),
-                              "foto": os.path.exists(os.path.join(d, "resultado", "vista_foto.ply"))})
-                if len(items) >= 20:
-                    break
-        return web.json_response({"modelos": items})
+        """Para el iPhone: 'escaneos' = todos los de la PC con su estado (Mis escaneos) y 'modelos' = los que ya
+        se pueden abrir en Revisar 3D (versión ligera, ver tools/fbx_a_usdz.py)."""
+        modelos, escaneos = [], []
+        srv = self.server
+        if not OFRECER_MODELOS_AL_IPHONE or not os.path.isdir(self.root):
+            return web.json_response({"modelos": modelos, "escaneos": escaneos})
+        live = os.path.normpath(srv.session.dir) if srv.session is not None else None
+        procesando = bool(srv.status.get("procesando"))
+        proc_dir = os.path.normpath(getattr(srv, "processing_dir", "") or "") if procesando else None
+        por_preparar = None
+        for name in sorted(os.listdir(self.root), reverse=True):
+            d = os.path.join(self.root, name)
+            if not (name.startswith("RGBD_") and os.path.isdir(d)) or name.endswith("_descartado"):
+                continue
+            nd = os.path.normpath(d)
+            fbx = os.path.join(d, "resultado", "obj", "modelo_navisworks.fbx")
+            e = {"carpeta": name, "nombre": name.replace("RGBD_", ""),
+                 "fecha": datetime.fromtimestamp(os.path.getmtime(d)).strftime("%Y-%m-%d %H:%M"),
+                 "cuadros": self._cuadros(d), "estado": "pendiente", "modelo": False, "mb": 0, "version": 0,
+                 "miniatura": False, "foto": os.path.exists(os.path.join(d, "resultado", "vista_foto.ply"))}
+            if live == nd:
+                e["estado"] = "escaneando"
+            elif proc_dir == nd:
+                p = srv.status.get("progreso") or {}
+                e.update(estado="procesando", progreso=p.get("fraccion"), etapa=p.get("etapa"),
+                         restante_s=p.get("restante_s"))
+            elif os.path.exists(fbx):
+                info = srv.iphone_info(d)
+                usdz = os.path.join(d, "iphone", "modelo.usdz")
+                if info and info.get("ok"):
+                    st = os.stat(usdz)
+                    e.update(estado="listo", modelo=st.st_size <= MAX_USDZ_IPHONE, mb=round(st.st_size / 1e6, 1),
+                             version=int(st.st_mtime), triangulos=info.get("triangulos"),
+                             medidas_m=info.get("medidas_m"),
+                             miniatura=os.path.exists(os.path.join(d, "iphone", "miniatura.jpg")),
+                             fecha=datetime.fromtimestamp(os.path.getmtime(fbx)).strftime("%Y-%m-%d %H:%M"))
+                elif info:
+                    e.update(estado="solo_pc", motivo=info.get("motivo", ""))      # demasiado pesado para el iPhone
+                else:
+                    e["estado"] = "preparando"                                     # modelo listo; falta la versión ligera
+                    por_preparar = por_preparar or d
+            else:
+                err = _first_line(os.path.join(d, "resultado", "error.txt"))
+                if err:
+                    e.update(estado="error", motivo=err)
+            escaneos.append(e)
+            if e["modelo"] and len(modelos) < 20:
+                modelos.append({k: e[k] for k in ("carpeta", "nombre", "fecha", "version", "mb", "foto")})
+            if len(escaneos) >= 40:
+                break
+        # los modelos hechos antes de esta versión se preparan solos, uno a la vez, cuando la PC está libre
+        if por_preparar and not procesando and not srv.iphone_ocupado():
+            asyncio.ensure_future(srv.preparar_iphone(por_preparar))
+        return web.json_response({"modelos": modelos, "escaneos": escaneos, "procesando": procesando})
 
     async def tel_modelo(self, request):
         if not OFRECER_MODELOS_AL_IPHONE:
-            raise web.HTTPNotFound(text="Los modelos ya no se abren en el iPhone; usa el archivo de Navisworks en la PC")
+            raise web.HTTPNotFound(text="Los modelos no se ofrecen al iPhone en esta PC")
         d = self._safe(request.match_info["carpeta"])
-        p = os.path.join(d, "resultado", "modelo_texturizado.usdz")
-        if not os.path.exists(p):
-            raise web.HTTPNotFound(text="Este escaneo no tiene modelo terminado")
+        info = self.server.iphone_info(d)
+        p = os.path.join(d, "iphone", "modelo.usdz")
+        if not (info and info.get("ok")):
+            raise web.HTTPNotFound(text=(info or {}).get("motivo") or "La PC todavía está preparando este modelo para el iPhone")
         if os.path.getsize(p) > MAX_USDZ_IPHONE:
             raise web.HTTPNotFound(text="Este modelo es demasiado pesado para el iPhone")
         return web.FileResponse(p, headers={"Content-Type": "model/vnd.usdz+zip"})
+
+    async def tel_miniatura(self, request):
+        d = self._safe(request.match_info["carpeta"])
+        p = os.path.join(d, "iphone", "miniatura.jpg")
+        if not os.path.exists(p):
+            raise web.HTTPNotFound(text="Sin miniatura")
+        return web.FileResponse(p, headers={"Cache-Control": "no-cache"})
 
     async def tel_medidas(self, request):
         d = self._safe(request.match_info["carpeta"])
@@ -493,7 +561,7 @@ class Gestion:
             escala = float(escala) if escala else None
         except (TypeError, ValueError):
             escala = None
-        asyncio.create_task(self.server.final_processing(d, escala=escala))
+        asyncio.create_task(self.server.final_processing(d, escala=escala, desde_cero=bool(data.get("desde_cero"))))
         return web.json_response({"ok": True})
 
     # ---------------------------------------------------------- actualizaciones
@@ -622,8 +690,22 @@ class Gestion:
             return web.json_response({"ok": False, "mensaje": f"No se pudo descargar: {e}"})
 
     async def salir(self, request):
+        proc = getattr(self.server, "proc_actual", None)
+        if proc is not None and proc.returncode is None:       # no dejar procesos trabajando al cerrar
+            from diagnostico import matar_arbol
+            await asyncio.get_running_loop().run_in_executor(None, matar_arbol, proc.pid)
         asyncio.get_running_loop().call_later(0.5, os._exit, 0)
         return web.json_response({"ok": True})
+
+    # ---------------------------------------------------------- trabajo en curso: ver por dentro y cancelar
+
+    async def cancelar(self, request):
+        ok, msg = await self.server.cancelar()
+        return web.json_response({"ok": ok, "mensaje": msg})
+
+    async def proceso(self, request):
+        """Lo que pasa por dentro ahora: etapa, CPU/RAM, segundos sin mensajes y las últimas líneas del proceso."""
+        return web.json_response(self.server.info_proceso())
 
     # ---------------------------------------------------------- modelo y medidas de un escaneo
 
@@ -631,8 +713,70 @@ class Gestion:
         d = self._safe(request.match_info["carpeta"])
         p = os.path.join(d, "resultado", "modelo_texturizado.glb")
         if not os.path.exists(p):
-            raise web.HTTPNotFound(text="Este escaneo no tiene modelo procesado")
+            # escaneos creados antes del GLB: se prepara para el visor a partir del FBX de Navisworks (una sola vez)
+            fbx = os.path.join(d, "resultado", "obj", "modelo_navisworks.fbx")
+            if not os.path.exists(fbx):
+                raise web.HTTPNotFound(text="Este escaneo no tiene modelo procesado")
+            error = await self._fbx_a_glb(fbx, p)
+            if error:
+                raise web.HTTPInternalServerError(text=error)
         return web.FileResponse(p)
+
+    async def claude_estado(self, request):
+        """Lo que Claude está haciendo en esta PC: la última prueba del conector y su registro."""
+        base = self.root
+        trab = None
+        try:
+            with open(os.path.join(base, "trabajo_prueba.json"), encoding="utf-8") as f:
+                trab = json.load(f)
+        except (OSError, ValueError):
+            trab = None
+        reg_path = os.path.join(base, "registro.txt")
+        if trab:
+            try:
+                from mcp_levanta import _vivo
+                trab["en_curso"] = bool(_vivo(trab.get("pid")))
+            except Exception:       # noqa: BLE001
+                trab["en_curso"] = None
+            if trab.get("carpeta") and trab.get("nombre"):
+                reg_path = os.path.join(base, trab["carpeta"], "pruebas", trab["nombre"], "registro.txt")
+        try:
+            with open(reg_path, encoding="utf-8", errors="replace") as f:
+                todo = f.read()[-200000:]
+        except OSError:
+            todo = ""
+        lineas = todo.splitlines()
+        prog = [x for x in lineas if x.startswith("@@PROGRESO")]
+        if trab is not None:
+            trab["ultima_etapa"] = prog[-1].split("|", 1)[-1] if prog else None
+        visibles = [x for x in lineas if x.strip() and not x.startswith("@@PROGRESO")][-60:]
+        return web.json_response({"trabajo": trab, "registro": visibles})
+
+    async def registro_escaneo(self, request):
+        """Texto del registro de este escaneo (etapas y tiempos de la creación del modelo)."""
+        d = self._safe(request.match_info["carpeta"])
+        p = os.path.join(d, "registro_escaneo.txt")
+        if not os.path.exists(p):
+            return web.Response(status=404, text="Este escaneo no tiene registro propio (se creó antes de esta versión).",
+                                content_type="text/plain", charset="utf-8")
+        with open(p, encoding="utf-8", errors="replace") as f:
+            return web.Response(text=f.read(), content_type="text/plain", charset="utf-8")
+
+    async def _fbx_a_glb(self, fbx, glb):
+        """Convierte el FBX en el GLB del visor (proceso aparte, para no gastar la memoria del programa)."""
+        from servidor_levanta import PYTHON, NO_WINDOW, TOOLS
+        locks = self.__dict__.setdefault("_conv_locks", {})
+        lock = locks.setdefault(glb, asyncio.Lock())
+        async with lock:                       # si abren el mismo escaneo dos veces, se convierte una sola vez
+            if os.path.exists(glb):
+                return ""
+            proc = await asyncio.create_subprocess_exec(
+                PYTHON, os.path.join(TOOLS, "fbx_a_glb.py"), fbx, glb,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, creationflags=NO_WINDOW)
+            salida, _ = await proc.communicate()
+            if proc.returncode != 0 or not os.path.exists(glb):
+                return "No se pudo preparar el modelo para el visor: " + salida.decode("utf-8", "replace")[-300:]
+        return ""
 
     async def vista_foto(self, request):
         """Vista foto-realista (Gaussian Splatting) del escaneo, si ya se entrenó."""
@@ -990,11 +1134,15 @@ class Gestion:
         app.router.add_post("/api/actualizar_pc", self.actualizar_pc)
         app.router.add_post("/api/descargar_app", self.descargar_app)
         app.router.add_post("/api/salir", self.salir)
+        app.router.add_post("/api/cancelar", self.cancelar)
+        app.router.add_get("/api/proceso", self.proceso)
         app.router.add_post("/api/archivo/validar", self.archivo_validar)
         app.router.add_post("/api/archivo/instalar", self.archivo_instalar)
         app.router.add_get("/api/ultima", self.ultima)
         app.router.add_post("/api/instalar_iphone", self.instalar_iphone)
         app.router.add_get("/api/modelo/{carpeta}", self.modelo)
+        app.router.add_get("/api/registro/{carpeta}", self.registro_escaneo)
+        app.router.add_get("/api/claude", self.claude_estado)
         app.router.add_route("*", "/api/vista_foto/{carpeta}", self.vista_foto)
         app.router.add_post("/api/vista_foto_crear", self.vista_foto_crear)
         app.router.add_post("/api/html_crear", self.html_crear)
@@ -1008,6 +1156,7 @@ class Gestion:
         app.router.add_get("/telefono/modelos.json", self.tel_modelos)        # para el iPhone (solo lectura)
         app.router.add_get("/telefono/modelo/{carpeta}", self.tel_modelo)
         app.router.add_get("/telefono/medidas/{carpeta}", self.tel_medidas)
+        app.router.add_get("/telefono/miniatura/{carpeta}", self.tel_miniatura)
         app.router.add_route("*", "/telefono/vista_foto/{carpeta}", self.vista_foto)
         app.router.add_get("/app/info.json", self.app_info)          # visible para el iPhone en la red local
         app.router.add_get("/app/Levanta.ipa", self.app_ipa)

@@ -38,6 +38,12 @@
   .prog-bar > i { display: block; height: 100%; width: 0; background: var(--accent); border-radius: inherit; transition: width .6s ease; }
   .prog-stage { font-size: 12px; color: var(--muted); }
   .prog.done .prog-bar > i { background: var(--ok); }
+  .prog-diag { font: 11px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+  .prog-diag.warn { color: var(--accent); }
+  .prog-actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .diag-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .diag-grid .stat b.warn { color: var(--accent); }
+  .diag-grid .stat b.bad { color: var(--bad); }
   .stat { display: flex; flex-direction: column; }
   .stat b { font: 600 20px/1.1 var(--mono); font-variant-numeric: tabular-nums; }
   .stat span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
@@ -55,6 +61,8 @@
   .page { position: fixed; top: 52px; left: 0; right: 0; bottom: 0; background: var(--bg); overflow: auto; padding: 24px; z-index: 4; }
   .wrap { max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
   .page h2 { margin: 0; font-size: 20px; }
+  .log { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; background: #0b0e12; border: 1px solid var(--line);
+         border-radius: 8px; padding: 10px; max-height: 60vh; overflow: auto; color: var(--muted); margin: 0; }
   .muted { color: var(--muted); }
   .card { background: var(--solid); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
@@ -116,6 +124,8 @@
     <button role="tab" aria-selected="true" data-tab="visor" type="button">Visor</button>
     <button role="tab" aria-selected="false" data-tab="escaneos" type="button">Escaneos</button>
     <button role="tab" aria-selected="false" data-tab="actualizaciones" type="button">Actualizaciones</button>
+    <button role="tab" aria-selected="false" data-tab="proceso" type="button">Por dentro</button>
+    <button role="tab" aria-selected="false" data-tab="claude" type="button">Claude</button>
   </nav>
   <div class="conn"><span id="dot"></span><span id="conn-text">Conectando…</span></div>
 </header>
@@ -135,6 +145,7 @@
   </div>
   <div id="viewing" class="panel" hidden><span id="viewing-name"></span>
     <button class="btn mini" id="look-btn" type="button" hidden>Ver la malla</button>
+    <button class="btn mini" id="close-model" type="button">Cerrar</button>
     <button class="btn mini" id="back-live" type="button">Volver a en vivo</button></div>
   <div id="meas" class="panel">
     <h3>Medidas</h3>
@@ -166,6 +177,45 @@
       <div id="root-msg" class="muted"></div>
     </div>
     <div id="scan-list" class="wrap" style="width:100%"></div>
+  </div>
+</section>
+
+<section id="tab-proceso" class="page" hidden>
+  <div class="wrap">
+    <div class="row"><h2>Por dentro</h2>
+      <button class="btn danger btn-cancelar" id="proc-cancel" type="button" style="margin-left:auto" disabled>Cancelar el proceso</button></div>
+    <div class="card">
+      <div id="proc-estado" class="muted">Consultando…</div>
+      <div id="proc-prog"></div>
+    </div>
+    <div class="card">
+      <div class="diag-grid">
+        <div class="stat"><b id="d-cpu">—</b><span>CPU (todos los núcleos)</span></div>
+        <div class="stat"><b id="d-ram">—</b><span>RAM del proceso</span></div>
+        <div class="stat"><b id="d-priv">—</b><span>memoria pedida</span></div>
+        <div class="stat"><b id="d-pf">—</b><span>fallos de página / s</span></div>
+        <div class="stat"><b id="d-libre">—</b><span>RAM libre en la PC</span></div>
+        <div class="stat"><b id="d-procs">—</b><span>procesos trabajando</span></div>
+        <div class="stat"><b id="d-quieto">—</b><span>sin mensajes desde</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="muted">Salida del proceso en vivo (todo lo que escribe, con hora). Si algo sale mal, aquí se ve en qué iba.</div>
+      <pre class="log" id="proc-log"></pre>
+    </div>
+  </div>
+</section>
+
+<section id="tab-claude" class="page" hidden>
+  <div class="wrap">
+    <h2>Claude</h2>
+    <div class="card">
+      <div id="claude-estado" class="muted">Consultando…</div>
+    </div>
+    <div class="card">
+      <div class="muted">Registro de la última prueba (se actualiza solo mientras estás en esta pestaña)</div>
+      <pre class="log" id="claude-log"></pre>
+    </div>
   </div>
 </section>
 
@@ -235,11 +285,95 @@ const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Typ
 const tabs = document.querySelectorAll('nav button');
 function show(name) {
   tabs.forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
-  for (const t of ['visor', 'escaneos', 'actualizaciones']) $('tab-' + t).hidden = t !== name;
+  for (const t of ['visor', 'escaneos', 'actualizaciones', 'proceso', 'claude']) $('tab-' + t).hidden = t !== name;
+  if (name === 'claude') startClaude(); else stopClaude();
+  if (name === 'proceso') startProc(); else stopProc();
   if (name === 'escaneos') loadScans();
   if (name === 'actualizaciones') { checkUpdates(); showStoredApp(); loadIA(); }
 }
 tabs.forEach(b => b.onclick = () => show(b.dataset.tab));
+
+// ---------- pestaña Claude: qué está haciendo en esta PC
+let claudeTimer = null;
+async function loadClaude() {
+  try {
+    const r = await fetch('/api/claude').then(x => x.json());
+    const t = r.trabajo;
+    let txt;
+    if (!t) txt = 'Claude todavía no ha creado ninguna prueba en esta PC.';
+    else if (t.en_curso) txt = 'Claude está creando la prueba "' + t.nombre + '" (escaneo ' + t.carpeta + ')'
+      + (t.ultima_etapa ? '. Etapa: ' + t.ultima_etapa : '.');
+    else txt = 'Última prueba: "' + t.nombre + '" (escaneo ' + t.carpeta + '). Ya no está corriendo.';
+    $('claude-estado').textContent = txt;
+    $('claude-log').textContent = (r.registro || []).join('\n') || '(sin registro todavía)';
+  } catch (e) {
+    $('claude-estado').textContent = 'No se pudo leer el estado de Claude.';
+  }
+}
+function startClaude() { stopClaude(); loadClaude(); claudeTimer = setInterval(loadClaude, 3000); }
+
+// ---------- pestaña "Por dentro": el trabajo en curso, su CPU/RAM y su salida en vivo; botón para cancelar
+let procTimer = null;
+const mb = (v) => v == null ? '—' : (v >= 1000 ? (v / 1000).toFixed(1) + ' GB' : v + ' MB');
+function diagText(d) {
+  if (!d || d.cpu_pct == null) return null;
+  const quieto = d.sin_salida_s || 0;
+  return { text: `CPU ${d.cpu_pct} % · RAM ${mb(d.ram_mb)} · libre ${mb(d.ram_libre_mb)} · ${d.procesos} proc.`
+                 + (d.paginando ? ' · usando el disco como memoria (lento)' : '')
+                 + (quieto > 120 ? ` · sin mensajes hace ${mins(quieto)}` : ''),
+           warn: quieto > 600 || d.paginando || (d.ram_total_mb && d.ram_libre_mb < 0.06 * d.ram_total_mb) };
+}
+// confirmación dentro de la página (sin ventanita del navegador): primer toque arma, segundo toque (antes de 6 s) cancela
+let cancelArmado = 0;
+const cancelArmadoAhora = () => Date.now() - cancelArmado < 6000;
+const textoCancelar = (largo) => cancelArmadoAhora() ? '¿Seguro? Toca otra vez para cancelar' : (largo ? 'Cancelar el proceso' : 'Cancelar');
+function pintarCancelar() {
+  for (const b of document.querySelectorAll('.btn-cancelar')) b.textContent = textoCancelar(b.id === 'proc-cancel');
+}
+async function cancelarProceso() {
+  if (!cancelArmadoAhora()) {
+    cancelArmado = Date.now(); pintarCancelar();
+    setTimeout(pintarCancelar, 6100);
+    return;
+  }
+  cancelArmado = 0;
+  for (const b of document.querySelectorAll('.btn-cancelar')) { b.disabled = true; b.textContent = 'Cancelando…'; }
+  log('Cancelando… (las fotos del escaneo no se borran)');
+  try {
+    const r = await post('/api/cancelar', {});
+    log(r.mensaje || (r.ok ? 'Cancelado' : 'No se pudo cancelar'));
+  } catch (e) { log('No se pudo cancelar: ' + e); }
+  if (!$('tab-proceso').hidden) loadProc();
+}
+$('proc-cancel').onclick = cancelarProceso;
+async function loadProc() {
+  try {
+    const r = await fetch('/api/proceso').then(x => x.json());
+    const d = r.diagnostico || {};
+    $('proc-estado').textContent = r.procesando
+      ? `Trabajando: ${d.trabajo || 'proceso'} · ${String(r.carpeta || '').replace('RGBD_', '')}${d.pid ? ' · pid ' + d.pid : ''}${r.cancelando ? ' · cancelando…' : ''}`
+      : `No hay nada procesándose. Último mensaje: ${r.mensaje || '—'}`;
+    $('proc-prog').replaceChildren(...(r.procesando && r.progreso ? [progressView({ ...r.progreso, _at: Date.now() })] : []));
+    $('proc-cancel').disabled = !r.procesando || r.cancelando;
+    $('proc-cancel').textContent = r.cancelando ? 'Cancelando…' : textoCancelar(true);
+    const set = (id, v, cls) => { const b = $(id); b.textContent = v; b.className = cls || ''; };
+    const ramBaja = d.ram_total_mb && d.ram_libre_mb < 0.06 * d.ram_total_mb;
+    set('d-cpu', d.cpu_pct != null ? d.cpu_pct + ' %' : '—');
+    set('d-ram', mb(d.ram_mb));
+    set('d-priv', mb(d.privada_mb), d.paginando ? 'bad' : '');
+    set('d-pf', d.fallos_pag_s != null ? d.fallos_pag_s.toLocaleString('es-MX') : '—', d.fallos_pag_s > 5000 ? 'warn' : '');
+    set('d-libre', mb(d.ram_libre_mb), ramBaja ? 'bad' : '');
+    set('d-procs', d.procesos ?? '—');
+    set('d-quieto', r.procesando && d.sin_salida_s != null ? (d.sin_salida_s < 60 ? d.sin_salida_s + ' s' : mins(d.sin_salida_s)) : '—',
+        d.sin_salida_s > 600 ? 'warn' : '');
+    const pre = $('proc-log'), abajo = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+    pre.textContent = (r.salida || []).join('\n') || '(todavía no hay salida)';
+    if (abajo) pre.scrollTop = pre.scrollHeight;
+  } catch (e) { $('proc-estado').textContent = 'No se pudo leer el estado del proceso.'; }
+}
+function startProc() { stopProc(); loadProc(); procTimer = setInterval(loadProc, 2000); }
+function stopProc() { if (procTimer) clearInterval(procTimer); procTimer = null; }
+function stopClaude() { if (claudeTimer) clearInterval(claudeTimer); claudeTimer = null; }
 
 // ---------- visor 3D
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -310,11 +444,12 @@ function onStatus(s) {
   $('frames').textContent = s.cuadros.toLocaleString('es-MX');
   $('kf').textContent = s.clave.toLocaleString('es-MX');
   if (s.mensaje && s.mensaje !== lastMsg) { log(s.mensaje); lastMsg = s.mensaje; }
+  diag = s.procesando ? (s.diagnostico || null) : null;
   onProgress(s.progreso || null, !!s.procesando);
 }
 
 // ---------- avance de "crear el modelo 3D"
-let progress = null, wasProcessing = false, doneAt = null, lastFase = null;
+let progress = null, wasProcessing = false, doneAt = null, lastFase = null, diag = null;
 const mins = (sec) => {
   if (sec == null) return null;
   if (sec < 60) return 'menos de 1 min';
@@ -340,6 +475,20 @@ function progressView(p) {
   box.setAttribute('role', 'progressbar');
   box.setAttribute('aria-valuemin', '0'); box.setAttribute('aria-valuemax', '100'); box.setAttribute('aria-valuenow', String(pct));
   box.querySelector('.prog-bar > i').style.width = `${Math.max(1, pct)}%`;
+  if (!done) {
+    const dt = diagText(diag);
+    if (dt) box.append(el('div', { className: 'prog-diag' + (dt.warn ? ' warn' : ''), textContent: dt.text }));
+    const acciones = el('div', { className: 'prog-actions' });
+    if ($('tab-proceso').hidden) {          // en "Por dentro" ya se está viendo
+      const ver = el('button', { className: 'btn mini', type: 'button', textContent: 'Ver por dentro' });
+      ver.onclick = () => show('proceso');
+      acciones.append(ver);
+    }
+    const cancel = el('button', { className: 'btn mini danger btn-cancelar', type: 'button', textContent: textoCancelar(false) });
+    cancel.onclick = cancelarProceso;
+    acciones.append(cancel);
+    box.append(acciones);
+  }
   return box;
 }
 function onProgress(p, processing) {
@@ -544,11 +693,21 @@ $('meas-reproc').onclick = async () => {
 
 // ---------- abrir un escaneo procesado
 const loader = new GLTFLoader();
+// libera la memoria de un modelo cerrado (con varios escaneos abiertos seguidos la PC se llenaría)
+function disposeModel(m) {
+  if (!m) return;
+  m.traverse(o => {
+    if (!o.isMesh) return;
+    if (o.geometry) o.geometry.dispose();
+    const mat = o.material;
+    if (mat) { if (mat.map) mat.map.dispose(); mat.dispose(); }
+  });
+}
 async function openScan(carpeta, nombre) {
   show('visor');
-  setHint('Cargando el modelo…');
+  setHint('Cargando el modelo… (la primera vez que se abre un escaneo puede tardar unos minutos)');
   loader.load('/api/modelo/' + encodeURIComponent(carpeta), async (gltf) => {
-    if (model) scene.remove(model);
+    if (model) { scene.remove(model); disposeModel(model); }
     model = gltf.scene;
     // como en las fotos: sin luces ni sombras artificiales (la luz real ya está en la textura)
     model.traverse(o => {
@@ -605,7 +764,7 @@ $('look-btn').onclick = () => { photoLook = !photoLook; applyLook(); };
 
 $('back-live').onclick = () => {
   removePhotoView();
-  if (model) { scene.remove(model); model = null; }
+  if (model) { scene.remove(model); disposeModel(model); model = null; }
   viewing = 'vivo'; $('viewing').hidden = true;
   if (mesh) mesh.visible = true;
   measuring = false; pending = null; $('measure-btn').classList.remove('on'); setHint('');
@@ -614,6 +773,9 @@ $('back-live').onclick = () => {
   renderList(); drawMeasures(); fit();
 };
 renderList();
+
+// Cerrar el modelo abierto y volver a la lista de escaneos para abrir otro
+$('close-model').onclick = () => { $('back-live').onclick(); show('escaneos'); };
 
 // Revisar 3D desde el visor: abre el último escaneo procesado
 $('review-btn').onclick = async () => {
@@ -652,11 +814,14 @@ async function loadScans() {
       const body = el('div', { className: 'scan-body' });
       const actions = el('div', { className: 'row' });
 
-      const crear = (texto, forzar) => {
-        const b = el('button', { className: 'btn primary', type: 'button', textContent: texto });
+      // si hay avance guardado (se canceló o falló a la mitad), el botón continúa desde ahí en vez de empezar de cero
+      const crear = (texto, forzar, desdeCero) => {
+        const sigue = s.avance && !desdeCero;
+        if (sigue) texto = 'Continuar donde se quedó';
+        const b = el('button', { className: desdeCero ? 'btn' : 'btn primary', type: 'button', textContent: texto });
         b.onclick = async () => {
-          b.disabled = true; b.textContent = 'Creando el modelo… (unos minutos)';
-          const r = await post('/api/reprocesar', { carpeta: s.carpeta, forzar: !!forzar });
+          b.disabled = true; b.textContent = sigue ? 'Continuando…' : 'Creando el modelo…';
+          const r = await post('/api/reprocesar', { carpeta: s.carpeta, forzar: !!forzar, desde_cero: !!desdeCero });
           if (!r.ok) { b.disabled = false; b.textContent = texto; body.append(el('div', { className: 'muted', textContent: r.mensaje })); }
           else setTimeout(loadScans, 1500);
         };
@@ -684,6 +849,10 @@ async function loadScans() {
         pills.append(el('span', { className: 'pill warn', textContent: 'no se pudo crear el modelo' }));
         body.append(el('div', { className: 'muted', textContent: `Motivo: ${s.error}` }));
         actions.append(crear('Intentar de nuevo'));
+        if (s.avance) {
+          body.append(el('div', { className: 'muted', textContent: `Avance guardado: ${s.avance.texto} (${s.avance.hora}). Al continuar no se repite lo ya hecho.` }));
+          actions.append(crear('Empezar de cero', false, true));
+        }
         const det = el('button', { className: 'btn', type: 'button', textContent: 'Ver detalle' });
         det.onclick = () => post('/api/abrir', { ruta: ruta('error.txt') });
         actions.append(det);
@@ -691,13 +860,18 @@ async function loadScans() {
         pills.append(el('span', { className: 'pill warn', textContent: s.procesado ? 'el modelo no se terminó' : 'falta crear el modelo' }));
         body.append(el('div', { className: 'muted', textContent: 'Aquí solo están las fotos y medidas del iPhone. "Crear modelo 3D" las convierte en el modelo con fotos para Navisworks (tarda unos minutos y verás el avance).' }));
         actions.append(crear('Crear modelo 3D'));
+        if (s.avance) {
+          body.append(el('div', { className: 'muted', textContent: `Avance guardado: ${s.avance.texto} (${s.avance.hora}). Al continuar no se repite lo ya hecho.` }));
+          actions.append(crear('Empezar de cero', false, true));
+        }
       } else {
         pills.append(el('span', { className: 'pill ok', textContent: 'modelo listo' }));
         const fileRow = (titulo, nota, nombre, etiqueta) => {
           if (!has(nombre)) return null;
           const f = s.archivos.find(x => x.nombre === nombre);
-          const abrir = el('button', { className: 'btn mini', type: 'button', textContent: 'Abrir' });
-          abrir.onclick = () => post('/api/abrir', { ruta: ruta(nombre) });
+          const enVisor = nombre.endsWith('.fbx');      // el programa prepara el modelo para el visor desde el FBX
+          const abrir = el('button', { className: 'btn mini', type: 'button', textContent: enVisor ? 'Abrir en el visor' : 'Abrir' });
+          abrir.onclick = enVisor ? () => openScan(s.carpeta, s.nombre) : () => post('/api/abrir', { ruta: ruta(nombre) });
           const ver = el('button', { className: 'btn mini', type: 'button', textContent: 'Mostrar en carpeta' });
           ver.onclick = () => post('/api/abrir', { ruta: ruta(nombre), mostrar: true });
           return el('div', { className: 'file-row' },
@@ -728,6 +902,28 @@ async function loadScans() {
       const open = el('button', { className: 'btn', type: 'button', textContent: 'Abrir carpeta' });
       open.onclick = () => post('/api/abrir', { ruta: s.carpeta });
       actions.append(open);
+      // registro propio de este escaneo (etapas y tiempos), listo para pegarlo donde se necesite
+      const reg = el('button', { className: 'btn', type: 'button', textContent: 'Copiar registro' });
+      reg.title = 'Copia el registro de este escaneo (etapas y tiempos de la creación del modelo)';
+      reg.onclick = async () => {
+        const normal = () => { reg.textContent = 'Copiar registro'; };
+        try {
+          const r = await fetch('/api/registro/' + encodeURIComponent(s.carpeta));
+          const t = await r.text();
+          if (!r.ok) { reg.textContent = t; setTimeout(normal, 5000); return; }
+          let ok = false;
+          try { await navigator.clipboard.writeText(t); ok = true; } catch (e) {
+            const ta = document.createElement('textarea');
+            ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.append(ta); ta.select();
+            try { ok = document.execCommand('copy'); } catch (e2) { ok = false; }
+            ta.remove();
+          }
+          reg.textContent = ok ? 'Copiado ✓' : 'No se pudo copiar';
+        } catch (e) { reg.textContent = 'No se pudo leer el registro'; }
+        setTimeout(normal, 3000);
+      };
+      actions.append(reg);
       // borrar el escaneo completo (confirmación dentro de la tarjeta; va a la Papelera de reciclaje)
       if (!(s.en_curso && s.iphone_conectado) && !s.procesando) {
         const del = el('button', { className: 'btn danger', type: 'button', textContent: 'Borrar escaneo' });

@@ -165,6 +165,12 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     private var streamIndex = 0
     private let gaps = GapFinder()
     private var reviewing = false          // mirando Revisar 3D: el seguimiento sigue, pero no se suman puntos
+    /// Conectado a la PC ("solo captura"): el iPhone manda fotos y profundidad y la PC arma el modelo. Aquí solo
+    /// queda un mapa grueso (un punto cada 2 cm, 1 de cada 16 lecturas, sin la capa de 2 mm) para pintar por
+    /// dónde ya pasaste y guiar el recorrido: gasta una fracción de memoria y procesador. Solo en `queue`.
+    private var lightMode = false
+    /// Lo mismo, para la pantalla: se está escaneando en modo "solo captura" con la PC.
+    @Published var pcCapture = false
 
     /// Al abrir/cerrar Revisar 3D en pleno escaneo: la sesión de ARKit no se pausa (así no se corren los objetos al seguir).
     func setReviewing(_ on: Bool) { queue.async { self.reviewing = on } }
@@ -282,6 +288,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let minObs = UInt16(max(1, minObservations))
         let smooth = smoothDepth
         let rgbd = recordRGBD
+        let pcMode = streamToPC && link.isConnected
         queue.async {
             self.activeSmooth = smooth
             self.activeRecordRGBD = rgbd
@@ -295,7 +302,10 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 }
             }
             if start && self.sums.isEmpty {
-                self.activeVoxel = voxel
+                // el modo se decide al empezar un escaneo nuevo y se conserva hasta borrarlo
+                self.lightMode = pcMode
+                self.activeVoxel = pcMode ? 0.02 : voxel
+                DispatchQueue.main.async { self.pcCapture = pcMode }
             }
             self.activeMaxDepth = depth
             self.activeMinConfidence = conf
@@ -853,12 +863,15 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         st.zoneDepth = [Float](repeating: 0, count: zones.count)
         st.depths.reserveCapacity(1600)
         var sampleTick = 0
+        let light = lightMode
+        let step = light ? 4 : pixelStep            // solo captura: 1 de cada 16 lecturas basta para el mapa grueso
+        let tickMask = light ? 1 : 31               // misma cantidad de muestras de distancia para la guía
 
-        for v in stride(from: 0, to: dh, by: pixelStep) {
+        for v in stride(from: 0, to: dh, by: step) {
             let dPtr = dBase.advanced(by: v * dRow).assumingMemoryBound(to: Float32.self)
             let cPtr = cBase.advanced(by: v * cRow).assumingMemoryBound(to: UInt8.self)
             let iv = min(imgH - 1, Int((Float(v) + 0.5) / sy))
-            for u in stride(from: 0, to: dw, by: pixelStep) {
+            for u in stride(from: 0, to: dw, by: step) {
                 if cPtr[u] < minConf { continue }
                 if let mask, mask[v * dw + u] { continue }       // persona: no se integra
                 let d = dPtr[u]
@@ -870,7 +883,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 let pw = T * SIMD4<Float>(xc, -yc, -d, 1)
                 let p = SIMD3<Float>(pw.x, pw.y, pw.z)
                 sampleTick &+= 1
-                if sampleTick & 31 == 0 { st.depths.append(d) }
+                if sampleTick & tickMask == 0 { st.depths.append(d) }
                 var zi = -1
                 if hasZones {
                     for k in 0..<zones.count where zones[k].contains(p) { zi = k; break }
@@ -895,7 +908,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 let c = SIMD3<Float>(r, g, b)
 
                 // dentro de una pieza enfocada (y de cerca): además, un punto cada 2 mm
-                if (d <= fineRange || (zi >= 0 && d <= 1.2)) && fineSums.count < maxFineVoxels {
+                if !light && (d <= fineRange || (zi >= 0 && d <= 1.2)) && fineSums.count < maxFineVoxels {
                     let gx = (p.x * fineInv).rounded(.down), gy = (p.y * fineInv).rounded(.down)
                     let gz = (p.z * fineInv).rounded(.down)
                     if abs(gx) < fineLimit && abs(gy) < fineLimit && abs(gz) < fineLimit {
@@ -942,6 +955,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                         }
                     }
                     st.total += 1
+                    // solo captura: sin capa de 2 mm, la pieza enfocada cuenta como leída con 3 lecturas del mapa grueso
+                    if light && zi >= 0 && counts[i] >= 3 { st.zoneConfirmed[zi] += 1 }
                     if nearCounts[i] >= 8 || (closeCounts[i] >= 8 && diverse[i]) { st.good += 1 }
                 } else {
                     st.total += 1
@@ -958,7 +973,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                 }
             }
         }
-        if activeCleanNoise {
+        if activeCleanNoise && !light {
             carve(dBase: dBase, cBase: cBase, dw: dw, dh: dh, dRow: dRow, cRow: cRow,
                   fx: fx, fy: fy, cx: cx, cy: cy, T: T, mask: mask)
         }
@@ -1138,8 +1153,10 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         queue.async {
             let minObs = self.activeMinObs
             let total = self.counts.reduce(0) { $0 + ($1 >= minObs ? 1 : 0) } + self.archivedPoints
+            // solo captura: los puntos del mapa grueso se dibujan más grandes para que se vea por dónde ya pasaste
+            let light = self.lightMode
             let geometry = show ? self.buildGeometry(mode: mode, maxPoints: 900_000,
-                                                     pointSize: 3, maxRadius: 3) : nil
+                                                     pointSize: 3, maxRadius: light ? 9 : 3) : nil
             DispatchQueue.main.async {
                 self.pointCount = total
                 self.pointsNode.geometry = geometry

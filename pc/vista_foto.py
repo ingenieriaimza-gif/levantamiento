@@ -108,7 +108,7 @@ def comando(exe, datos, salida_dir, nombre, pasos=PASOS, max_res=MAX_RESOLUCION,
 _RE_PASO = re.compile(r"(?:Refine|Eval) iter (\d+)")
 
 
-async def entrenar(sdir, on_avance, pasos=PASOS, max_res=MAX_RESOLUCION, on_linea=None):
+async def entrenar(sdir, on_avance, pasos=PASOS, max_res=MAX_RESOLUCION, on_linea=None, on_proc=None):
     """
     Entrena la vista foto-realista del escaneo en `sdir` (usa sdir/splat, hecho por exportar_splat).
     on_avance(fracción 0–1, texto). Devuelve la ruta del .ply o lanza RuntimeError con el motivo.
@@ -138,6 +138,8 @@ async def entrenar(sdir, on_avance, pasos=PASOS, max_res=MAX_RESOLUCION, on_line
     proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE,
                                                 stderr=asyncio.subprocess.STDOUT, env=env,
                                                 creationflags=NO_WINDOW)
+    if on_proc:
+        on_proc(proc)           # para poder cancelarlo desde el programa
     ultimas = []
     on_avance(0.02, "Cargando las fotos en la tarjeta de video")
     async for raw in proc.stdout:

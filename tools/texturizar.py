@@ -69,9 +69,34 @@ def _shelf_pack(sizes, page):
     return out, pg + 1
 
 
+def _acomodar(tam, tsc, page_size, max_paginas=None):
+    """Acomoda los parches (tam[n,2] píxeles de foto, tsc[n] escala de cada uno) en páginas de textura.
+    Si no caben en `max_paginas` (tope según la memoria de la PC: en un espacio grande, 0.2 mm por píxel serían
+    decenas de gigas de imagen), baja el detalle de TODA la textura por igual hasta que quepan.
+    Devuelve (tsc, tamaño de cada parche, lugar [página, x, y], número de páginas)."""
+    tsc = np.asarray(tsc, float).copy()
+    factor = 1.0
+    paginas0 = None
+    for _ in range(8):
+        csize = np.maximum(1, np.round(tam * tsc[:, None]).astype(int))
+        place, n_pages = _shelf_pack([tuple(x) for x in csize.tolist()], page_size)
+        if paginas0 is None:
+            paginas0 = n_pages
+        if not max_paginas or n_pages <= max_paginas:
+            break
+        f_ = math.sqrt(max_paginas / float(n_pages)) * 0.96
+        factor *= f_
+        tsc = (tsc * f_).clip(0.02, 1.0)
+    if factor < 1.0:
+        _log(f"  textura ajustada a la memoria de esta PC: de {paginas0} a {n_pages} páginas de {page_size}² "
+             f"(detalle de las fotos al {factor * 100:.0f} %)")
+    return tsc, csize, np.array(place, int).reshape(-1, 3), n_pages
+
+
 def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
                  page_size=4096, zbuf_scale=2, smooth_iters=20, to_z_up=None, scale=1.0,
-                 harmonize=True, texture_scale=1.0, consume=False, comparar=None):
+                 harmonize=True, texture_scale=1.0, consume=False, comparar=None, max_paginas=None,
+                 avance_ck=None):
     """
     mesh: TriangleMesh de Open3D en el mundo de ARKit (Y arriba, metros).
     frames: lista de cuadros (dicts con jpg, fx, fy, cx, cy, w, h, T) como en procesar_rgbd.
@@ -198,21 +223,38 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
 
     from concurrent.futures import ThreadPoolExecutor
     from paralelo import nucleos
+    # avance guardado: qué fotos ven cada triángulo (lo más tardado de esta etapa). Vale solo para esta misma
+    # malla y estas mismas fotos (se comprueba con una firma).
+    firma = [int(nF), int(K), int(NCAND), int(F.sum() % 1_000_000_007), round(float(V.sum()), 3),
+             round(float(sum(float(np.sum(fr["T"])) for fr in frames)), 4)]
+    k_ini = 0
+    previo = avance_ck.cargar("fotos_candidatas") if avance_ck is not None else None
+    if previo and previo[0].get("firma") == firma and previo[1].get("cand_score", np.zeros(0)).shape == cand_score.shape:
+        cand_score, cand_frame = previo[1]["cand_score"], previo[1]["cand_frame"]
+        k_ini = int(previo[0].get("hechas", 0))
+        _log(f"  se continúa donde se quedó: {k_ini} de {K} fotos ya estaban revisadas")
+    del previo
+    t_ck = time.time()
     # varias fotos a la vez (el trazado de rayos y numpy sueltan el candado de Python)
     with ThreadPoolExecutor(max_workers=min(12, nucleos())) as ex:
-        for k, res in enumerate(ex.map(_evaluar, range(K))):
-            if res is None:
-                continue
-            idx, score = res
-            # entra si supera a la peor de las guardadas para ese triángulo
-            peor = cand_score[idx].argmin(1)
-            entra = score > cand_score[idx, peor]
-            cand_score[idx[entra], peor[entra]] = score[entra]
-            cand_frame[idx[entra], peor[entra]] = k
+        for k, res in enumerate(ex.map(_evaluar, range(k_ini, K)), start=k_ini):
+            if res is not None:
+                idx, score = res
+                # entra si supera a la peor de las guardadas para ese triángulo
+                peor = cand_score[idx].argmin(1)
+                entra = score > cand_score[idx, peor]
+                cand_score[idx[entra], peor[entra]] = score[entra]
+                cand_frame[idx[entra], peor[entra]] = k
             if k % 5 == 0:
                 _avance(0.40 + 0.22 * (k + 1) / K, f"Eligiendo la mejor foto para cada zona ({k + 1} de {K})")
             if (k + 1) % 50 == 0:
                 _log(f"  {k + 1}/{K} fotos evaluadas ({time.time() - t0:.0f} s)")
+            # cada ~4 minutos (y al final) se guarda lo revisado
+            if avance_ck is not None and (k == K - 1 or time.time() - t_ck > 240):
+                t_ck = time.time()
+                avance_ck.guardar("fotos_candidatas", f"fotos revisadas: {k + 1} de {K}",
+                                  datos={"firma": firma, "hechas": k + 1},
+                                  cand_score=cand_score, cand_frame=cand_frame)
 
     o = np.argsort(-cand_score, axis=1)
     cand_score = np.take_along_axis(cand_score, o, 1)
@@ -300,9 +342,14 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
         lim = 1000.0 / mm_px
         tsc = np.where(np.isfinite(px_m) & (px_m > lim), lim / px_m, tsc)
         tsc = np.minimum(tsc, float(texture_scale)).clip(0.05, 1.0)
-    csize = np.maximum(1, np.round((hi - lo + 1) * tsc[:, None]).astype(int))
-    place, n_pages = _shelf_pack([tuple(x) for x in csize.tolist()], page_size)
-    place = np.array(place, int).reshape(-1, 3)
+    tsc, csize, place, n_pages = _acomodar(hi - lo + 1, tsc, page_size, max_paginas if nC else None)
+
+    # --- nivelado de costuras: corrección suave de color para que no se noten las uniones entre fotos
+    # (antes de reservar las páginas de textura: así no compiten por la memoria)
+    nivel = None
+    if harmonize and nC:
+        _avance(0.64, "Igualando el color entre fotos")
+        nivel = _nivelar_costuras(frames, F, labels, lab_faces, corner_uv, gains, K)
 
     # triángulos sin foto: cada uno recibe un cuadrito con su propio color (del LiDAR), no un gris único
     none = np.nonzero(labels < 0)[0]
@@ -315,12 +362,7 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     page_of = np.zeros(nF, np.int32)
     face_uv = np.zeros((nF, 3, 2))
 
-    # --- nivelado de costuras: corrección suave de color para que no se noten las uniones entre fotos
-    nivel = None
-    if harmonize and nC:
-        _avance(0.64, "Igualando el color entre fotos")
-        nivel = _nivelar_costuras(frames, F, labels, lab_faces, corner_uv, gains, K)
-    f_ord = np.argsort(chart_of, kind="stable")
+    f_ord =np.argsort(chart_of, kind="stable")
     f_ini = np.searchsorted(chart_of[f_ord], np.arange(nC + 1)) if nC else np.zeros(1, int)
 
     _avance(0.66, "Armando la textura con las fotos")
@@ -400,6 +442,14 @@ def texture_mesh(mesh, frames, out_dir, dmax=3.0, target_triangles=700_000,
     os.makedirs(out_dir, exist_ok=True)
     _avance(0.75, "Guardando el modelo con fotos")
     _export(V * scale, F, face_uv, page_of, pages, out_dir, to_z_up)
+    # si el modelo se creó de nuevo con menos páginas, se quitan las imágenes sobrantes del modelo anterior
+    try:
+        k = len(pages)
+        while os.path.exists(os.path.join(out_dir, "obj", f"textura_{k}.jpg")):
+            os.remove(os.path.join(out_dir, "obj", f"textura_{k}.jpg"))
+            k += 1
+    except OSError:
+        pass
     if comparar:
         try:
             comparar_con_fotos(V, F, face_uv, page_of, pages, comparar[1], comparar[0])
@@ -564,20 +614,41 @@ def _nivelar_costuras(frames, F, labels, lab_faces, corner_uv, gains, K, lam=0.1
     a, b, dif = a[ok], b[ok], dif[ok]
     if len(a) < 100:
         return None
-    # suavidad dentro de la misma foto: aristas de cada cara
-    pc = inv.reshape(-1, 3)
-    ea = np.r_[pc[:, 0], pc[:, 1], pc[:, 2]]
+    # suavidad dentro de la misma foto: aristas de cada cara.
+    # Ahorro de memoria (en una PC de 5 GB esta matriz llegaba a pedir más de 5 GB y la PC paginaba al disco
+    # durante más de una hora): cada arista interior sale en sus dos caras; se guarda UNA vez con peso
+    # lam*sqrt(veces), que da exactamente las mismas ecuaciones normales (mismo resultado), y la matriz usa
+    # índices de 32 bits y valores float32.
+    pc = inv.reshape(-1, 3).astype(np.int64)
+    ea =np.r_[pc[:, 0], pc[:, 1], pc[:, 2]]
     eb = np.r_[pc[:, 1], pc[:, 2], pc[:, 0]]
+    lo_e, hi_e = np.minimum(ea, eb), np.maximum(ea, eb)
+    del ea, eb
+    claves, veces = np.unique(lo_e * nP + hi_e, return_counts=True)
+    del lo_e, hi_e
+    ea = (claves // nP).astype(np.int32)
+    eb = (claves % nP).astype(np.int32)
+    del claves
+    pesos = (lam * np.sqrt(veces)).astype(np.float32)
+    del veces
     nS, nE = len(a), len(ea)
     mu = 0.01
-    rows = np.r_[np.arange(nS), np.arange(nS), nS + np.arange(nE), nS + np.arange(nE), nS + nE + np.arange(nP)]
-    cols = np.r_[a, b, ea, eb, np.arange(nP)]
-    vals = np.r_[np.ones(nS), -np.ones(nS), np.full(nE, lam), np.full(nE, -lam), np.full(nP, mu)]
+    i32 = lambda x: np.asarray(x, dtype=np.int32)        # noqa: E731
+    rows = np.concatenate([i32(np.arange(nS)), i32(np.arange(nS)), i32(nS + np.arange(nE)), i32(nS + np.arange(nE)),
+                           i32(nS + nE + np.arange(nP))])
+    cols = np.concatenate([i32(a), i32(b), ea, eb, i32(np.arange(nP))])
+    vals = np.concatenate([np.ones(nS, np.float32), -np.ones(nS, np.float32), pesos, -pesos,
+                           np.full(nP, mu, np.float32)])
+    del ea, eb, pesos
     A = coo_matrix((vals, (rows, cols)), shape=(nS + nE + nP, nP)).tocsr()
+    del rows, cols, vals                                 # la copia COO ya no hace falta
     g = np.zeros((nP, 3), np.float32)
     for ch in range(3):
-        rhs = np.r_[dif[:, ch], np.zeros(nE + nP)]
+        rhs = np.zeros(nS + nE + nP, np.float64)
+        rhs[:nS] = dif[:, ch]
         g[:, ch] = lsqr(A, rhs, atol=1e-4, btol=1e-4, iter_lim=250)[0]
+        del rhs
+    del A
     g = np.clip(g, -60, 60)
     antes = np.abs(dif).mean()
     despues = np.abs(dif - (g[a] - g[b])).mean()

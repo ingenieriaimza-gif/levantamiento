@@ -13,8 +13,25 @@ import numpy as np
 import open3d as o3d
 
 
+def procesos():
+    """Procesos de apoyo a la vez. Cada uno carga Open3D y una copia de su parte de la malla, así que en una
+    PC con poca memoria se usan menos (ver perfil.py); los hilos (nucleos()) no copian nada y van todos."""
+    try:
+        from perfil import perfil
+        return max(1, min(nucleos(), perfil()["procesos"]))
+    except Exception:       # noqa: BLE001
+        return nucleos()
+
+
 def _prioridad_alta():
-    """En Windows, los procesos de apoyo nacen con prioridad normal: se suben como el principal."""
+    """En Windows, los procesos de apoyo nacen con prioridad normal: se suben como el principal
+    (salvo en PCs con poca memoria: ahí todo va con prioridad normal para que la PC siga respondiendo)."""
+    try:
+        from perfil import perfil
+        if not perfil()["prioridad_alta"]:
+            return
+    except Exception:       # noqa: BLE001
+        pass
     if os.name == "nt":
         try:
             import ctypes
@@ -64,7 +81,7 @@ def simplificar(mesh, meta, log=None, min_paralelo=1_500_000):
     n = len(mesh.triangles)
     if n <= meta:
         return mesh
-    workers = nucleos()
+    workers = procesos()
     if workers < 2 or n < min_paralelo:
         return mesh.simplify_quadric_decimation(int(meta))
     t0 = time.time()
@@ -203,7 +220,7 @@ def taubin_paralelo(mesh, iteraciones=10, margen=0.15, log=None, min_paralelo=80
     """Taubin de Open3D en bloques a la vez (uno por núcleo). Cada bloque lleva alrededor 15 cm extra de
     malla, más de lo que alcanza a "viajar" el suavizado, así que el resultado es igual al de hacerlo entero."""
     V, F, C = _arrays(mesh)
-    workers = nucleos()
+    workers = procesos()
     if workers < 2 or len(F) < min_paralelo:
         m = mesh.filter_smooth_taubin(number_of_iterations=iteraciones)
         m.compute_vertex_normals()
@@ -338,23 +355,37 @@ def limpiar_orillas(mesh, anillos=2, min_triangles=1500, log=None):
     return out
 
 
-def superficie_continua(mesh, profundidad=None, max_dist=0.05, quitar_densidad=0.04, log=None):
+def superficie_continua(mesh, profundidad=None, max_dist=0.05, quitar_densidad=0.04, log=None,
+                        celda=0.006, max_profundidad=11):
     """Reconstrucción Poisson: una sola superficie continua y lisa que pasa por todos los puntos (como
     las apps de escaneo comerciales). Cierra huecos chicos y deja orillas limpias. Después se recorta
     todo lo que quedó lejos de lo medido (> max_dist) o con muy pocos puntos cerca (densidad baja),
-    para no inventar superficies."""
+    para no inventar superficies.
+    Devuelve None si el espacio es tan grande que, para conservar el detalle (celdas de `celda` m), haría falta
+    más profundidad de la que cabe en la memoria de esta PC (`max_profundidad`); quien llama usa entonces el
+    acabado clásico, que conserva el detalle de la malla y casi no gasta memoria."""
     t0 = time.time()
+    if profundidad is None:
+        Vb = np.asarray(mesh.vertices)
+        if not len(Vb):
+            return None
+        ext = float(np.max(Vb.max(0) - Vb.min(0)))
+        # se acepta hasta un 23 % más de celda (−0.3) antes de pedir el doble de resolución (8 veces más memoria)
+        necesaria = int(np.ceil(np.log2(max(ext, 0.1) / celda) - 0.3))
+        if necesaria > max_profundidad:
+            if log:
+                log(f"  superficie continua omitida: el espacio mide {ext:.1f} m y con la memoria de esta PC "
+                    f"perdería detalle (celdas de {ext / 2 ** max_profundidad * 1000:.0f} mm); se usa el acabado "
+                    "que conserva el detalle de la malla")
+            return None
+        profundidad = int(np.clip(necesaria, 8, 11))
     m = o3d.geometry.TriangleMesh(mesh)
     m.compute_vertex_normals()
     pcd = o3d.geometry.PointCloud(m.vertices)
     pcd.normals = m.vertex_normals
     if m.has_vertex_colors():
         pcd.colors = m.vertex_colors
-    pcd = pcd.voxel_down_sample(0.004)
-    if profundidad is None:
-        # celdas de ~6 mm sin importar el tamaño del espacio (más grande = más profundidad, hasta 11)
-        ext = float(np.max(pcd.get_max_bound() - pcd.get_min_bound()))
-        profundidad = int(np.clip(np.ceil(np.log2(max(ext, 0.1) / 0.006)), 8, 11))
+    pcd = pcd.voxel_down_sample(max(0.004, celda * 0.66))
     p, dens = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
         pcd, depth=profundidad, n_threads=nucleos())
     dens = np.asarray(dens)
