@@ -1156,7 +1156,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             // solo captura: los puntos del mapa grueso se dibujan más grandes para que se vea por dónde ya pasaste
             let light = self.lightMode
             let geometry = show ? self.buildGeometry(mode: mode, maxPoints: 900_000,
-                                                     pointSize: 3, maxRadius: light ? 9 : 3) : nil
+                                                     pointSize: 3, maxRadius: light ? 9 : 3, overlay: true) : nil
             DispatchQueue.main.async {
                 self.pointCount = total
                 self.pointsNode.geometry = geometry
@@ -1232,10 +1232,10 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     /// verde = leída de cerca (≤ 1.5 m) desde al menos 2 vistas → sale nítida y exacta;
     /// amarillo = vista, pero de lejos o desde una sola vista → acércate o rodéala;
     /// rojo = apenas vista.
-    static let qualityExcellent = SIMD3<Float>(0.02, 0.50, 0.26)
-    static let qualityGood = SIMD3<Float>(0.48, 0.90, 0.45)
-    static let qualityFair = SIMD3<Float>(0.98, 0.70, 0.15)
-    static let qualityPoor = SIMD3<Float>(0.95, 0.24, 0.20)
+    static let qualityExcellent = SIMD3<Float>(0.00, 0.62, 0.40)
+    static let qualityGood = SIMD3<Float>(0.40, 0.90, 0.35)
+    static let qualityFair = SIMD3<Float>(1.00, 0.66, 0.00)
+    static let qualityPoor = SIMD3<Float>(1.00, 0.12, 0.18)
 
     private func qualityColor(count: UInt16, near: UInt16, close: UInt16, diverse: Bool) -> SIMD3<Float> {
         if close >= 8 && diverse { return Self.qualityExcellent }
@@ -1299,16 +1299,32 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     /// Construye la geometría de puntos. En modo cobertura se incluyen también los puntos
     /// de una sola lectura (en rojo) para que se vea el ruido y lo que falta reforzar.
+    ///
+    /// overlay = vista sobre la cámara: cada punto mide lo mismo que su celda (5 mm, 2 cm, 2 mm), así que de cerca
+    /// los puntos se tocan y forman una capa pintada continua sobre la superficie, y de lejos se ven chicos.
+    /// En cobertura lo que ya quedó bien (verde) se pinta tenue, para que la vista se vaya limpiando conforme
+    /// avanzas, y lo que falta (amarillo/rojo) se pinta fuerte: el ojo se va solo a donde hay que repasar.
     private func buildGeometry(mode: ColorMode, maxPoints: Int,
-                               pointSize: CGFloat, maxRadius: CGFloat) -> SCNGeometry? {
+                               pointSize: CGFloat, maxRadius: CGFloat, overlay: Bool = false) -> SCNGeometry? {
         let n = sums.count
-        guard n > 0 else { return nil }
+        guard n > 0 || !archSums.isEmpty else { return nil }
         let step = max(1, n / maxPoints)
         let minObs: UInt16 = mode == .coverage ? 1 : activeMinObs
         var verts: [SIMD3<Float>] = []
         var cols: [SIMD3<Float>] = []
         verts.reserveCapacity(n / step + 1)
         cols.reserveCapacity(n / step + 1)
+        // grupos: capa (0 = celdas normales, 1 = resumido lejano, 2 = 2 mm cerca de ti) × (0 = falta, 1 = ya bien)
+        var groups = [[UInt32]](repeating: [], count: 6)
+        let coverage = mode == .coverage
+        @inline(__always) func isDone(_ c: SIMD3<Float>) -> Bool {
+            coverage && (c == Self.qualityExcellent || c == Self.qualityGood)
+        }
+        @inline(__always) func add(_ p: SIMD3<Float>, _ c: SIMD3<Float>, _ layer: Int) {
+            groups[layer * 2 + (isDone(c) ? 1 : 0)].append(UInt32(verts.count))
+            verts.append(p)
+            cols.append(c)
+        }
         let cam = lastCamPos
         let r2 = fineDrawRadius * fineDrawRadius
         let fineOn = !fineSums.isEmpty
@@ -1322,12 +1338,8 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
                     i += step
                     continue          // cerca de ti se dibujan los puntos de 2 mm
                 }
-                verts.append(pt)
-                if mode == .coverage {
-                    cols.append(qualityColor(count: cnt, near: nearCounts[i], close: closeCounts[i], diverse: diverse[i]))
-                } else {
-                    cols.append(colorSums[i] / (k * 255))
-                }
+                add(pt, coverage ? qualityColor(count: cnt, near: nearCounts[i], close: closeCounts[i], diverse: diverse[i])
+                                 : colorSums[i] / (k * 255), 0)
             }
             i += step
         }
@@ -1337,8 +1349,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             let qcol = [Self.qualityPoor, Self.qualityFair, Self.qualityGood, Self.qualityExcellent]
             for j in Swift.stride(from: 0, to: archSums.count, by: aStep) {
                 let k = Float(archCounts[j])
-                verts.append(archSums[j] / k)
-                cols.append(mode == .coverage ? qcol[Int(archQuality[j])] : archColors[j] / (k * 255))
+                add(archSums[j] / k, coverage ? qcol[Int(archQuality[j])] : archColors[j] / (k * 255), 1)
             }
         }
         // puntos de 2 mm alrededor de ti, con el color de calidad de su zona (el mismo de la leyenda)
@@ -1356,19 +1367,18 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
             let j = Int(nearIdx[t])
             let k = Float(fineCounts[j])
             let p = fineSums[j] / k
-            verts.append(p)
-            if mode == .coverage {
+            var c = Self.qualityFair
+            if coverage {
                 let key = ((Int64((p.x * inv5).rounded(.down)) + half5) << 42) |
                           ((Int64((p.y * inv5).rounded(.down)) + half5) << 21) | (Int64((p.z * inv5).rounded(.down)) + half5)
                 if let ci = keyToIndex[key] {
-                    let c = Int(ci)
-                    cols.append(qualityColor(count: counts[c], near: nearCounts[c], close: closeCounts[c], diverse: diverse[c]))
-                } else {
-                    cols.append(Self.qualityFair)
+                    let q = Int(ci)
+                    c = qualityColor(count: counts[q], near: nearCounts[q], close: closeCounts[q], diverse: diverse[q])
                 }
             } else {
-                cols.append(fineColorSums[j] / (k * 255))
+                c = fineColorSums[j] / (k * 255)
             }
+            add(p, c, 2)
         }
         guard !verts.isEmpty else { return nil }
 
@@ -1381,18 +1391,37 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         let cSource = SCNGeometrySource(data: cData, semantic: .color, vectorCount: cols.count,
                                         usesFloatComponents: true, componentsPerVector: 3,
                                         bytesPerComponent: 4, dataOffset: 0, dataStride: vStride)
-        let indices = (0..<UInt32(verts.count)).map { $0 }
-        let element = SCNGeometryElement(indices: indices, primitiveType: .point)
-        element.pointSize = pointSize
-        element.minimumPointScreenSpaceRadius = 1
-        element.maximumPointScreenSpaceRadius = maxRadius
-
-        let geometry = SCNGeometry(sources: [vSource, cSource], elements: [element])
-        let material = SCNMaterial()
-        material.lightingModel = .constant
-        material.diffuse.contents = UIColor.white
-        material.isDoubleSided = true
-        geometry.materials = [material]
+        // tamaño real de cada capa (un poco más que la celda para que se toquen y no queden rendijas)
+        let layerSize: [CGFloat] = [CGFloat(activeVoxel) * 1.35, 0.027, CGFloat(fineVoxel) * 1.6]
+        var elements: [SCNGeometryElement] = []
+        var materials: [SCNMaterial] = []
+        for g in 0..<groups.count where !groups[g].isEmpty {
+            let element = SCNGeometryElement(indices: groups[g], primitiveType: .point)
+            if overlay {
+                element.pointSize = layerSize[g / 2]
+                element.minimumPointScreenSpaceRadius = 1.5
+                element.maximumPointScreenSpaceRadius = 28
+            } else {
+                element.pointSize = pointSize
+                element.minimumPointScreenSpaceRadius = 1
+                element.maximumPointScreenSpaceRadius = maxRadius
+            }
+            elements.append(element)
+            let material = SCNMaterial()
+            material.lightingModel = .constant
+            material.diffuse.contents = UIColor.white
+            material.isDoubleSided = true
+            if overlay {
+                // capa translúcida: se sigue viendo la cámara debajo (lo que ya está bien, casi transparente)
+                material.transparency = coverage ? (g % 2 == 1 ? 0.28 : 0.72) : 0.9
+                material.blendMode = .alpha
+                material.writesToDepthBuffer = false
+                material.readsFromDepthBuffer = true      // la pared invisible sigue tapando lo de atrás
+            }
+            materials.append(material)
+        }
+        let geometry = SCNGeometry(sources: [vSource, cSource], elements: elements)
+        geometry.materials = materials
         return geometry
     }
 
