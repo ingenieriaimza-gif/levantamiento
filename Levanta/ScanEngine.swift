@@ -544,7 +544,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         }
         if savedKeyframe { requestHighRes(session: session, at: frame.timestamp) }
         if link.isConnected, let depth = chosen,
-           savedKeyframe || frame.timestamp - lastStreamTime >= 0.25 {
+           savedKeyframe || frame.timestamp - lastStreamTime >= 0.15 {
             lastStreamTime = frame.timestamp
             streamFrame(frame, depth: depth, keyframe: savedKeyframe, mask: mask)
         }
@@ -650,7 +650,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
     /// y la manda a la PC, que la usa para la textura. La profundidad y la fusión siguen con los cuadros normales.
     private func requestHighRes(session: ARSession, at time: TimeInterval) {
         guard Self.highResPhotos, link.isConnected,
-              time - hrLastTime >= 0.8, link.backlog <= 16 else { return }
+              time - hrLastTime >= 0.8, link.backlogBytes <= 60_000_000 else { return }
         hrLock.lock()
         if hrBusy { hrLock.unlock(); return }
         hrBusy = true
@@ -685,9 +685,16 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
 
     /// Envía un cuadro completo (foto a resolución completa, profundidad, confianza y posición) a la PC.
     private func streamFrame(_ frame: ARFrame, depth: ARDepthData, keyframe: Bool, mask: [Bool]?) {
-        // los cuadros que no son fotos clave solo sirven para la forma: a media resolución si la foto es 4K
-        let sc: CGFloat = (!keyframe && CVPixelBufferGetWidth(frame.capturedImage) > 2500) ? 0.5 : 1.0
-        guard let jpg = FrameCodec.jpeg(frame, scale: sc, quality: 0.85),
+        // Los cuadros que no son fotos clave sirven para la FORMA: lo valioso es su profundidad, que pesa poco.
+        // Antes, si la red estaba ocupada (fotos de 12 MP en camino) se tiraban completos, y la PC se quedaba sin
+        // la profundidad de zonas que el iPhone sí mostraba como escaneadas → huecos en el modelo.
+        // Ahora nunca se tiran: si la red va cargada se mandan con una foto chiquita, pero con toda su profundidad.
+        let backlog = link.backlogBytes
+        if !keyframe && backlog > 150_000_000 { return }    // solo si la red está prácticamente detenida
+        let congested = !keyframe && backlog > 12_000_000
+        let big = CVPixelBufferGetWidth(frame.capturedImage) > 2500
+        let sc: CGFloat = keyframe ? 1.0 : (congested ? (big ? 0.15 : 0.3) : (big ? 0.5 : 1.0))
+        guard let jpg = FrameCodec.jpeg(frame, scale: sc, quality: congested ? 0.6 : 0.85),
               let dc = FrameCodec.depthAndConfidence(depth, mask: mask) else { return }
         var h = FrameCodec.header(frame, index: streamIndex, scale: Float(sc))
         h["dw"] = dc.w
@@ -698,7 +705,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         h["nc"] = dc.conf.count
         guard let msg = FrameCodec.pack(kind: 1, header: h, payload: [jpg, dc.depth, dc.conf]) else { return }
         streamIndex += 1
-        link.send(msg, important: keyframe)
+        link.send(msg, important: true)
     }
 
     private func currentSessionName() -> String {

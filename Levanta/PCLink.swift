@@ -101,7 +101,7 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
         browser?.cancel(); browser = nil
         resolver?.cancel(); resolver = nil
         task?.cancel(with: .goingAway, reason: nil); task = nil
-        lock.lock(); connectedFlag = false; inflight = 0; lock.unlock()
+        lock.lock(); connectedFlag = false; inflight = 0; inflightBytes = 0; lock.unlock()
         DispatchQueue.main.async { self.state = newState }
     }
 
@@ -229,7 +229,7 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask,
                     didOpenWithProtocol protocol: String?) {
         guard webSocketTask === task else { return }
-        lock.lock(); connectedFlag = true; inflight = 0; lock.unlock()
+        lock.lock(); connectedFlag = true; inflight = 0; inflightBytes = 0; lock.unlock()
         let addr = webSocketTask.originalRequest?.url?.host ?? "PC"
         DispatchQueue.main.async {
             self.state = .connected(addr)
@@ -483,11 +483,24 @@ final class PCLink: NSObject, ObservableObject, URLSessionWebSocketDelegate {
         guard connectedFlag, let t = task else { lock.unlock(); return }
         if !important && inflight > 8 { lock.unlock(); return }
         inflight += 1
+        inflightBytes += data.count
         lock.unlock()
+        let n = data.count
         t.send(.data(data)) { [weak self] _ in
             guard let self else { return }
-            self.lock.lock(); self.inflight = max(0, self.inflight - 1); self.lock.unlock()
+            self.lock.lock()
+            self.inflight = max(0, self.inflight - 1)
+            self.inflightBytes = max(0, self.inflightBytes - n)
+            self.lock.unlock()
         }
+    }
+
+    private var inflightBytes = 0
+
+    /// Bytes que aún no terminan de salir (las fotos de 12 MP pesan mucho más que un cuadro de profundidad).
+    var backlogBytes: Int {
+        lock.lock(); defer { lock.unlock() }
+        return inflightBytes
     }
 
     /// Mensajes que aún no terminan de salir (para no apilar fotos grandes si la red va lenta).
