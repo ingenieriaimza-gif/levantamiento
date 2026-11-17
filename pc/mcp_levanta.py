@@ -20,6 +20,7 @@ import urllib.request
 
 AQUI = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.normpath(os.path.join(AQUI, "..", "tools"))
+sys.path.insert(0, AQUI)          # con -I no se agrega solo (para importar diagnostico.py)
 PUERTO = 8765
 NOMBRE_OK = re.compile(r"^[A-Za-z0-9_\-]{1,40}$")
 
@@ -278,9 +279,12 @@ def t_procesar_prueba(a):
            "--verificacion", os.path.join(sal, "verificacion.txt"), "--comparar", os.path.join(sal, "comparacion")]
     if not any(x.startswith("--voxel") for x in extra):
         cmd += ["--voxel", "0.004"]
-    for k, v in (("--dmax", "3.5"), ("--conf", "2"), ("--lecturas", "2"), ("--triangulos-textura", "3000000")):
+    # triángulos y texturas: los decide procesar_rgbd según la RAM de la PC (tools/perfil.py), salvo que se pidan
+    for k, v in (("--dmax", "3.5"), ("--conf", "2"), ("--lecturas", "2")):
         if k not in extra:
             cmd += [k, v]
+    if "--avance" not in extra:
+        cmd += ["--avance", os.path.join(sal, "avance")]       # si se cancela, la misma prueba continúa
     cmd += extra
     env = dict(os.environ)
     nuc = str(os.cpu_count() or 4)
@@ -289,12 +293,14 @@ def t_procesar_prueba(a):
         if not (k.startswith("LEVANTA_") or k.startswith("RGBD_")):
             raise Fallo("Solo se aceptan ajustes que empiecen con LEVANTA_ o RGBD_.")
         env[k] = str(v)
-    log = open(os.path.join(sal, "registro.txt"), "w", encoding="utf-8")
-    log.write("Comando: " + " ".join(cmd[4:]) + "\nAjustes: " + json.dumps(a.get("env") or {}) + "\n")
-    log.flush()
+    reg = os.path.join(sal, "registro.txt")
+    with open(reg, "w", encoding="utf-8") as log:
+        log.write("Comando: " + " ".join(cmd[4:]) + "\nAjustes: " + json.dumps(a.get("env") or {}) + "\n")
     flags = 0x08000000 if os.name == "nt" else 0          # sin ventana
-    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env,
-                            creationflags=flags)
+    # ejecutar_registrado deja al final del registro el código de salida y qué significa (si se cae, se sabe por qué)
+    envoltura = [py, "-I", "-X", "utf8", os.path.join(AQUI, "ejecutar_registrado.py"), reg, "--"]
+    proc = subprocess.Popen(envoltura + cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                            stdin=subprocess.DEVNULL, env=env, creationflags=flags)
     with open(TRABAJO, "w", encoding="utf-8") as f:
         json.dump({"pid": proc.pid, "carpeta": os.path.basename(d), "nombre": nombre,
                    "inicio": time.strftime("%Y-%m-%d %H:%M:%S"), "t0": time.time()}, f)
@@ -314,8 +320,63 @@ def t_trabajo(a):
     t["minutos"] = round((time.time() - t.get("t0", time.time())) / 60, 1) if t["en_curso"] else None
     t["ultima_etapa"] = prog[-1].split("|", 1)[-1] if prog else None
     t["termino_bien"] = (not t["en_curso"]) and os.path.exists(os.path.join(sal, "resultado", "obj", "modelo_navisworks.fbx"))
+    fin = [x for x in crudo.splitlines() if x.startswith("@@FIN ")]
+    if fin:
+        t["como_termino"] = fin[-1][6:]
+    elif not t["en_curso"]:
+        t["como_termino"] = ("se cortó sin dejar código de salida (prueba lanzada antes de esta versión, "
+                             "o la PC se reinició / se cerró el proceso a la fuerza)")
+    if t["en_curso"]:
+        from diagnostico import medir_arbol
+        t["diagnostico"] = medir_arbol(t["pid"])
+        try:
+            t["sin_mensajes_s"] = round(time.time() - os.path.getmtime(reg))
+        except OSError:
+            pass
     t["registro"] = _cola(reg, int(a.get("lineas", 25)))
     return _texto(t)
+
+
+def _api(ruta, datos=None):
+    """Llama al programa abierto (solo responde a esta misma PC)."""
+    req = urllib.request.Request(f"http://localhost:{PUERTO}{ruta}",
+                                 data=None if datos is None else json.dumps(datos).encode(),
+                                 headers={"Content-Type": "application/json", "X-Levanta": "1"},
+                                 method="GET" if datos is None else "POST")
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return json.load(r)
+
+
+def t_proceso(a):
+    try:
+        r = _api("/api/proceso")
+    except Exception as e:      # noqa: BLE001
+        raise Fallo(f"El programa Levantamiento 3D no responde (¿está abierto? ¿es versión 51 o más?): {e}")
+    n = int(a.get("lineas", 60))
+    r["salida"] = r.get("salida", [])[-n:]
+    return _texto(r)
+
+
+def t_cancelar(a):
+    que = a.get("que", "programa")
+    if que == "programa":
+        try:
+            r = _api("/api/cancelar", {})
+        except Exception as e:      # noqa: BLE001
+            raise Fallo(f"El programa no responde: {e}")
+        return _texto(r.get("mensaje") or r)
+    t = _trabajo()
+    if not t or not t["en_curso"]:
+        return _texto("No hay ninguna prueba corriendo.")
+    from diagnostico import matar_arbol
+    matar_arbol(t["pid"])
+    reg = os.path.join(BASE, t["carpeta"], "pruebas", t["nombre"], "registro.txt")
+    try:
+        with open(reg, "a", encoding="utf-8") as f:
+            f.write("\n@@FIN codigo=cancelada | cancelada por Claude desde el conector\n")
+    except OSError:
+        pass
+    return _texto(f"Prueba '{t['nombre']}' cancelada (se detuvieron todos sus procesos). El escaneo no se tocó.")
 
 
 def t_registro(a):
@@ -370,6 +431,13 @@ HERRAMIENTAS = [
       "args": {"type": "array", "items": {"type": "string"}}}, ["carpeta"], t_procesar_prueba),
     ("trabajo", "Avance de la prueba lanzada con procesar_prueba: si sigue corriendo, etapa, minutos y últimas líneas.",
      {"lineas": {"type": "integer"}}, [], t_trabajo),
+    ("proceso", "Por dentro del programa ahora: si está creando un modelo, etapa y avance, CPU/RAM de todos sus "
+     "procesos, RAM libre de la PC, segundos sin mensajes (atorado) y las últimas líneas que escribió el proceso.",
+     {"lineas": {"type": "integer", "description": "líneas de salida (def. 60, máx. 300)"}}, [], t_proceso),
+    ("cancelar", "Detiene un proceso que salió mal. que='programa': la creación del modelo / vista foto del "
+     "programa (igual que el botón Cancelar; las fotos del escaneo no se borran). que='prueba': la prueba lanzada "
+     "con procesar_prueba. Pide confirmación al usuario antes de cancelar algo que él lanzó.",
+     {"que": S(enum=["programa", "prueba"])}, ["que"], t_cancelar),
     ("registro", "Últimas líneas del registro del programa Levantamiento 3D (errores, conexiones del iPhone).",
      {"lineas": {"type": "integer"}}, [], t_registro),
     ("borrar_prueba", "Borra la carpeta de una prueba (pruebas/<nombre>) para liberar disco. No toca el escaneo.",
