@@ -1317,7 +1317,7 @@ final class ScanEngine: NSObject, ObservableObject, ARSessionDelegate {
         guard n > 0 || !archSums.isEmpty else { return nil }
         let step = max(1, n / maxPoints)
         // sobre la cámara no se dibuja lo leído una sola vez: la PC exige al menos 2 lecturas por punto
-        // y eso no saldría en el modelo (solo confundiría)
+        // y eso no saldría en el modelo (solo confundiría al escanear)
         let minObs: UInt16 = mode == .coverage ? (overlay ? 2 : 1) : activeMinObs
         var verts: [SIMD3<Float>] = []
         var cols: [SIMD3<Float>] = []
